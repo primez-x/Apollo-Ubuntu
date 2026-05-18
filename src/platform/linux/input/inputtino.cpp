@@ -36,6 +36,10 @@ namespace platf {
   }
 
   void move_mouse(input_t &input, int deltaX, int deltaY) {
+    if (VDISPLAY::notifyGamescopePointerMotionRelative(deltaX, deltaY)) {
+      return;
+    }
+
     if (VDISPLAY::notifyMutterPointerMotionRelative(deltaX, deltaY)) {
       return;
     }
@@ -45,6 +49,10 @@ namespace platf {
   }
 
   void abs_mouse(input_t &input, const touch_port_t &touch_port, float x, float y) {
+    if (VDISPLAY::notifyGamescopePointerMotionAbsolute(x, y)) {
+      return;
+    }
+
     if (VDISPLAY::notifyMutterPointerMotionAbsolute(x, y)) {
       return;
     }
@@ -54,6 +62,10 @@ namespace platf {
   }
 
   void button_mouse(input_t &input, int button, bool release) {
+    if (VDISPLAY::notifyGamescopePointerButton(button, release)) {
+      return;
+    }
+
     if (VDISPLAY::notifyMutterPointerButton(button, release)) {
       return;
     }
@@ -63,6 +75,10 @@ namespace platf {
   }
 
   void scroll(input_t &input, int high_res_distance) {
+    if (VDISPLAY::notifyGamescopePointerAxis(0.0, static_cast<double>(high_res_distance) / 12.0)) {
+      return;
+    }
+
     if (VDISPLAY::notifyMutterPointerAxis(0.0, static_cast<double>(high_res_distance) / 12.0)) {
       return;
     }
@@ -72,6 +88,10 @@ namespace platf {
   }
 
   void hscroll(input_t &input, int high_res_distance) {
+    if (VDISPLAY::notifyGamescopePointerAxis(static_cast<double>(high_res_distance) / 12.0, 0.0)) {
+      return;
+    }
+
     if (VDISPLAY::notifyMutterPointerAxis(static_cast<double>(high_res_distance) / 12.0, 0.0)) {
       return;
     }
@@ -81,6 +101,10 @@ namespace platf {
   }
 
   void keyboard_update(input_t &input, uint16_t modcode, bool release, uint8_t flags) {
+    if (VDISPLAY::notifyGamescopeKeyboardKey(modcode, release)) {
+      return;
+    }
+
     auto raw = (input_raw_t *) input.get();
     platf::keyboard::update(raw, modcode, release, flags);
   }

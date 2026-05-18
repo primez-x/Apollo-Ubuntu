@@ -1049,7 +1049,9 @@ editing the `conf` file in a text editor. Use the examples as reference.
             Select the Linux virtual display backend. The default uses EVDI to create
             a real GNOME/Wayland monitor, then captures that monitor through Mutter
             ScreenCast/PipeWire. This avoids direct CPU-side EVDI/KMS capture on
-            GNOME while still giving the compositor a real virtual monitor.
+            GNOME while still giving the compositor a real virtual monitor. The
+            `gamescope` backend starts an Apollo-owned headless Gamescope compositor
+            and captures its PipeWire node.
             @note{Applies to Linux only. `APOLLO_LINUX_VIRTUAL_BACKEND` can override
             this value for diagnostics.}
         </td>
@@ -1065,9 +1067,13 @@ editing the `conf` file in a text editor. Use the examples as reference.
             @endcode</td>
     </tr>
     <tr>
-        <td rowspan="3">Choices</td>
+        <td rowspan="4">Choices</td>
         <td>auto</td>
         <td>Use the EVDI monitor/PipeWire hybrid backend.</td>
+    </tr>
+    <tr>
+        <td>gamescope</td>
+        <td>Use an Apollo-owned headless Gamescope compositor with PipeWire capture and EI input.</td>
     </tr>
     <tr>
         <td>mutter</td>
@@ -1150,6 +1156,31 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>force</td>
         <td>Require DMA-BUF negotiation and fail the stream if unavailable or rejected by the compositor.</td>
+    </tr>
+</table>
+
+### linux_gamescope_session_command
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Optional long-running command to start inside the Gamescope compositor
+            before Apollo launches the selected application into that compositor's
+            Wayland/Xwayland environment. Leave blank to use a `sleep infinity`
+            supervisor. `APOLLO_GAMESCOPE_COMMAND` can override this value for
+            diagnostics.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}@endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            linux_gamescope_session_command = sleep infinity
+            @endcode</td>
     </tr>
 </table>
 

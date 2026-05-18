@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cctype>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
@@ -25,6 +26,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -32,11 +34,18 @@
 // platform includes
 #include <drm/drm.h>
 #include <fcntl.h>
+#include <linux/input-event-codes.h>
 #include <poll.h>
+#include <signal.h>
 #include <sys/ioctl.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
+
+#ifdef SUNSHINE_BUILD_LIBEI
+  #include <libei.h>
+#endif
 
 #ifdef SUNSHINE_BUILD_PIPEWIRE
   #include <gio/gio.h>
@@ -824,6 +833,790 @@ namespace VDISPLAY {
   static bool evdi_available = false;
   static BACKEND selected_backend = BACKEND::UNKNOWN;
 
+  static std::string xdg_runtime_path() {
+    const char *runtime = std::getenv("XDG_RUNTIME_DIR");
+    if (runtime && *runtime) {
+      return runtime;
+    }
+
+    return "/run/user/" + std::to_string(getuid());
+  }
+
+  static bool command_in_path(const char *command) {
+    const char *path_env = std::getenv("PATH");
+    if (!path_env || !*path_env) {
+      path_env = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+    }
+
+    std::stringstream path_stream(path_env);
+    std::string dir;
+    while (std::getline(path_stream, dir, ':')) {
+      if (dir.empty()) {
+        dir = ".";
+      }
+      auto candidate = fs::path(dir) / command;
+      if (::access(candidate.c_str(), X_OK) == 0) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  static std::string gamescope_binary() {
+    const char *override = std::getenv("APOLLO_GAMESCOPE_BINARY");
+    if (override && *override) {
+      BOOST_LOG(info) << "[VDISPLAY] APOLLO_GAMESCOPE_BINARY override is active: " << override;
+      return override;
+    }
+
+    return "gamescope";
+  }
+
+  static bool gamescope_binary_available(const std::string &binary) {
+    if (binary.find('/') != std::string::npos) {
+      return ::access(binary.c_str(), X_OK) == 0;
+    }
+
+    return command_in_path(binary.c_str());
+  }
+
+#ifdef SUNSHINE_BUILD_LIBEI
+  static std::optional<uint32_t> moonlight_vk_to_evdev(uint16_t modcode) {
+    switch (modcode) {
+      case 0x08:
+        return KEY_BACKSPACE;
+      case 0x09:
+        return KEY_TAB;
+      case 0x0D:
+        return KEY_ENTER;
+      case 0x10:
+      case 0xA0:
+        return KEY_LEFTSHIFT;
+      case 0x11:
+      case 0xA2:
+        return KEY_LEFTCTRL;
+      case 0x14:
+        return KEY_CAPSLOCK;
+      case 0x1B:
+        return KEY_ESC;
+      case 0x20:
+        return KEY_SPACE;
+      case 0x21:
+        return KEY_PAGEUP;
+      case 0x22:
+        return KEY_PAGEDOWN;
+      case 0x23:
+        return KEY_END;
+      case 0x24:
+        return KEY_HOME;
+      case 0x25:
+        return KEY_LEFT;
+      case 0x26:
+        return KEY_UP;
+      case 0x27:
+        return KEY_RIGHT;
+      case 0x28:
+        return KEY_DOWN;
+      case 0x2C:
+        return KEY_SYSRQ;
+      case 0x2D:
+        return KEY_INSERT;
+      case 0x2E:
+        return KEY_DELETE;
+      case 0x30:
+        return KEY_0;
+      case 0x31:
+        return KEY_1;
+      case 0x32:
+        return KEY_2;
+      case 0x33:
+        return KEY_3;
+      case 0x34:
+        return KEY_4;
+      case 0x35:
+        return KEY_5;
+      case 0x36:
+        return KEY_6;
+      case 0x37:
+        return KEY_7;
+      case 0x38:
+        return KEY_8;
+      case 0x39:
+        return KEY_9;
+      case 0x41:
+        return KEY_A;
+      case 0x42:
+        return KEY_B;
+      case 0x43:
+        return KEY_C;
+      case 0x44:
+        return KEY_D;
+      case 0x45:
+        return KEY_E;
+      case 0x46:
+        return KEY_F;
+      case 0x47:
+        return KEY_G;
+      case 0x48:
+        return KEY_H;
+      case 0x49:
+        return KEY_I;
+      case 0x4A:
+        return KEY_J;
+      case 0x4B:
+        return KEY_K;
+      case 0x4C:
+        return KEY_L;
+      case 0x4D:
+        return KEY_M;
+      case 0x4E:
+        return KEY_N;
+      case 0x4F:
+        return KEY_O;
+      case 0x50:
+        return KEY_P;
+      case 0x51:
+        return KEY_Q;
+      case 0x52:
+        return KEY_R;
+      case 0x53:
+        return KEY_S;
+      case 0x54:
+        return KEY_T;
+      case 0x55:
+        return KEY_U;
+      case 0x56:
+        return KEY_V;
+      case 0x57:
+        return KEY_W;
+      case 0x58:
+        return KEY_X;
+      case 0x59:
+        return KEY_Y;
+      case 0x5A:
+        return KEY_Z;
+      case 0x5B:
+        return KEY_LEFTMETA;
+      case 0x5C:
+        return KEY_RIGHTMETA;
+      case 0x60:
+        return KEY_KP0;
+      case 0x61:
+        return KEY_KP1;
+      case 0x62:
+        return KEY_KP2;
+      case 0x63:
+        return KEY_KP3;
+      case 0x64:
+        return KEY_KP4;
+      case 0x65:
+        return KEY_KP5;
+      case 0x66:
+        return KEY_KP6;
+      case 0x67:
+        return KEY_KP7;
+      case 0x68:
+        return KEY_KP8;
+      case 0x69:
+        return KEY_KP9;
+      case 0x6A:
+        return KEY_KPASTERISK;
+      case 0x6B:
+        return KEY_KPPLUS;
+      case 0x6D:
+        return KEY_KPMINUS;
+      case 0x6E:
+        return KEY_KPDOT;
+      case 0x6F:
+        return KEY_KPSLASH;
+      case 0x70:
+        return KEY_F1;
+      case 0x71:
+        return KEY_F2;
+      case 0x72:
+        return KEY_F3;
+      case 0x73:
+        return KEY_F4;
+      case 0x74:
+        return KEY_F5;
+      case 0x75:
+        return KEY_F6;
+      case 0x76:
+        return KEY_F7;
+      case 0x77:
+        return KEY_F8;
+      case 0x78:
+        return KEY_F9;
+      case 0x79:
+        return KEY_F10;
+      case 0x7A:
+        return KEY_F11;
+      case 0x7B:
+        return KEY_F12;
+      case 0x90:
+        return KEY_NUMLOCK;
+      case 0x91:
+        return KEY_SCROLLLOCK;
+      case 0xA1:
+        return KEY_RIGHTSHIFT;
+      case 0xA3:
+        return KEY_RIGHTCTRL;
+      case 0xA4:
+        return KEY_LEFTALT;
+      case 0xA5:
+        return KEY_RIGHTALT;
+      case 0xBA:
+        return KEY_SEMICOLON;
+      case 0xBB:
+        return KEY_EQUAL;
+      case 0xBC:
+        return KEY_COMMA;
+      case 0xBD:
+        return KEY_MINUS;
+      case 0xBE:
+        return KEY_DOT;
+      case 0xBF:
+        return KEY_SLASH;
+      case 0xC0:
+        return KEY_GRAVE;
+      case 0xDB:
+        return KEY_LEFTBRACE;
+      case 0xDC:
+        return KEY_BACKSLASH;
+      case 0xDD:
+        return KEY_RIGHTBRACE;
+      case 0xDE:
+        return KEY_APOSTROPHE;
+      case 0xE2:
+        return KEY_102ND;
+      default:
+        return std::nullopt;
+    }
+  }
+
+  class gamescope_ei_client_t {
+  public:
+    ~gamescope_ei_client_t() {
+      stop();
+    }
+
+    bool start(const std::string &socket_path) {
+      std::lock_guard lock(mutex);
+      if (ctx) {
+        return true;
+      }
+
+      ctx = ei_new_sender(nullptr);
+      if (!ctx) {
+        BOOST_LOG(error) << "[VDISPLAY] Failed to create Gamescope EI sender.";
+        return false;
+      }
+
+      ei_configure_name(ctx, "Apollo Gamescope Input");
+      int rc = ei_setup_backend_socket(ctx, socket_path.c_str());
+      if (rc < 0) {
+        BOOST_LOG(error) << "[VDISPLAY] Failed to connect to Gamescope EI socket [" << socket_path << "]: " << strerror(-rc);
+        ei_unref(ctx);
+        ctx = nullptr;
+        return false;
+      }
+
+      running = true;
+      thread = std::thread([this]() {
+        event_loop();
+      });
+      return true;
+    }
+
+    void stop() {
+      {
+        std::lock_guard lock(mutex);
+        running = false;
+      }
+
+      if (thread.joinable()) {
+        thread.join();
+      }
+
+      std::lock_guard lock(mutex);
+      pointer_device = unref_device(pointer_device);
+      keyboard_device = unref_device(keyboard_device);
+      if (ctx) {
+        ei_unref(ctx);
+        ctx = nullptr;
+      }
+      emulating_devices.clear();
+    }
+
+    bool pointer_motion_relative(double dx, double dy) {
+      std::lock_guard lock(mutex);
+      if (!ready_for(EI_DEVICE_CAP_POINTER)) {
+        return false;
+      }
+
+      ensure_emulating(pointer_device);
+      ei_device_pointer_motion(pointer_device, dx, dy);
+      ei_device_frame(pointer_device, ei_now(ctx));
+      return true;
+    }
+
+    bool pointer_motion_absolute(double x, double y) {
+      std::lock_guard lock(mutex);
+      if (!ready_for(EI_DEVICE_CAP_POINTER_ABSOLUTE)) {
+        return false;
+      }
+
+      ensure_emulating(pointer_device);
+      ei_device_pointer_motion_absolute(pointer_device, x, y);
+      ei_device_frame(pointer_device, ei_now(ctx));
+      return true;
+    }
+
+    bool pointer_button(int button, bool release) {
+      std::lock_guard lock(mutex);
+      if (!ready_for(EI_DEVICE_CAP_BUTTON)) {
+        return false;
+      }
+
+      ensure_emulating(pointer_device);
+      ei_device_button_button(pointer_device, static_cast<uint32_t>(button), !release);
+      ei_device_frame(pointer_device, ei_now(ctx));
+      return true;
+    }
+
+    bool pointer_axis(double dx, double dy) {
+      std::lock_guard lock(mutex);
+      if (!ready_for(EI_DEVICE_CAP_SCROLL)) {
+        return false;
+      }
+
+      ensure_emulating(pointer_device);
+      ei_device_scroll_delta(pointer_device, dx, dy);
+      ei_device_frame(pointer_device, ei_now(ctx));
+      return true;
+    }
+
+    bool keyboard_key(uint16_t modcode, bool release) {
+      auto key = moonlight_vk_to_evdev(modcode);
+      if (!key) {
+        return false;
+      }
+
+      std::lock_guard lock(mutex);
+      if (!keyboard_device || !keyboard_ready) {
+        return false;
+      }
+
+      ensure_emulating(keyboard_device);
+      ei_device_keyboard_key(keyboard_device, *key, !release);
+      ei_device_frame(keyboard_device, ei_now(ctx));
+      return true;
+    }
+
+  private:
+    static ei_device *unref_device(ei_device *device) {
+      if (device) {
+        ei_device_unref(device);
+      }
+      return nullptr;
+    }
+
+    bool ready_for(ei_device_capability capability) const {
+      return ctx && pointer_device && pointer_ready && ei_device_has_capability(pointer_device, capability);
+    }
+
+    void ensure_emulating(ei_device *device) {
+      if (device && emulating_devices.insert(device).second) {
+        ei_device_start_emulating(device, ++sequence);
+      }
+    }
+
+    void event_loop() {
+      while (true) {
+        {
+          std::lock_guard lock(mutex);
+          if (!running || !ctx) {
+            break;
+          }
+        }
+
+        int fd {};
+        {
+          std::lock_guard lock(mutex);
+          fd = ei_get_fd(ctx);
+        }
+
+        pollfd pfd {fd, POLLIN, 0};
+        poll(&pfd, 1, 100);
+
+        std::lock_guard lock(mutex);
+        if (!running || !ctx) {
+          break;
+        }
+
+        ei_dispatch(ctx);
+        while (auto *event = ei_get_event(ctx)) {
+          handle_event(event);
+          ei_event_unref(event);
+        }
+      }
+    }
+
+    void handle_event(ei_event *event) {
+      const auto type = ei_event_get_type(event);
+      switch (type) {
+        case EI_EVENT_SEAT_ADDED: {
+          auto *seat = ei_event_get_seat(event);
+          ei_seat_bind_capabilities(
+            seat,
+            EI_DEVICE_CAP_POINTER_ABSOLUTE,
+            EI_DEVICE_CAP_POINTER,
+            EI_DEVICE_CAP_BUTTON,
+            EI_DEVICE_CAP_SCROLL,
+            EI_DEVICE_CAP_KEYBOARD,
+            nullptr
+          );
+          break;
+        }
+        case EI_EVENT_DEVICE_ADDED: {
+          auto *device = ei_event_get_device(event);
+          if (!pointer_device &&
+              ei_device_has_capability(device, EI_DEVICE_CAP_POINTER_ABSOLUTE) &&
+              ei_device_has_capability(device, EI_DEVICE_CAP_BUTTON)) {
+            pointer_device = ei_device_ref(device);
+          }
+          if (!keyboard_device && ei_device_has_capability(device, EI_DEVICE_CAP_KEYBOARD)) {
+            keyboard_device = ei_device_ref(device);
+          }
+          break;
+        }
+        case EI_EVENT_DEVICE_RESUMED: {
+          auto *device = ei_event_get_device(event);
+          if (device == pointer_device) {
+            pointer_ready = true;
+            BOOST_LOG(info) << "[VDISPLAY] Gamescope EI pointer device is ready.";
+          }
+          if (device == keyboard_device) {
+            keyboard_ready = true;
+            BOOST_LOG(info) << "[VDISPLAY] Gamescope EI keyboard device is ready.";
+          }
+          break;
+        }
+        case EI_EVENT_DISCONNECT:
+          running = false;
+          break;
+        default:
+          break;
+      }
+    }
+
+    std::mutex mutex;
+    std::thread thread;
+    ei *ctx {};
+    ei_device *pointer_device {};
+    ei_device *keyboard_device {};
+    bool running {};
+    bool pointer_ready {};
+    bool keyboard_ready {};
+    std::set<ei_device *> emulating_devices;
+    uint32_t sequence {};
+  };
+#else
+  class gamescope_ei_client_t {
+  public:
+    bool start(const std::string &) {
+      BOOST_LOG(warning) << "[VDISPLAY] Gamescope EI input is unavailable because Apollo was built without libei.";
+      return false;
+    }
+    void stop() {}
+    bool pointer_motion_relative(double, double) { return false; }
+    bool pointer_motion_absolute(double, double) { return false; }
+    bool pointer_button(int, bool) { return false; }
+    bool pointer_axis(double, double) { return false; }
+    bool keyboard_key(uint16_t, bool) { return false; }
+  };
+#endif
+
+  class gamescope_session_t {
+  public:
+    ~gamescope_session_t() {
+      stop();
+    }
+
+    bool start(const std::string &display_name, uint32_t width, uint32_t height, uint32_t fps_hz) {
+      auto binary = gamescope_binary();
+      if (!gamescope_binary_available(binary)) {
+        BOOST_LOG(error) << "[VDISPLAY] Gamescope backend requested, but Gamescope binary is not executable: " << binary;
+        return false;
+      }
+
+      int pipe_fds[2] {-1, -1};
+      if (pipe(pipe_fds) < 0) {
+        BOOST_LOG(error) << "[VDISPLAY] Failed to create Gamescope log pipe: " << strerror(errno);
+        return false;
+      }
+
+      std::string width_arg = std::to_string(width);
+      std::string height_arg = std::to_string(height);
+      std::string refresh_arg = std::to_string(std::max<uint32_t>(1, fps_hz));
+      auto command = session_command();
+      auto extra_args = gamescope_extra_args();
+
+      pid = fork();
+      if (pid < 0) {
+        BOOST_LOG(error) << "[VDISPLAY] Failed to fork Gamescope: " << strerror(errno);
+        ::close(pipe_fds[0]);
+        ::close(pipe_fds[1]);
+        return false;
+      }
+
+      if (pid == 0) {
+        setsid();
+        ::close(pipe_fds[0]);
+        dup2(pipe_fds[1], STDOUT_FILENO);
+        dup2(pipe_fds[1], STDERR_FILENO);
+        ::close(pipe_fds[1]);
+
+        std::vector<std::string> args {
+          binary,
+          "--backend",
+          "headless",
+          "--keep-alive",
+          "--expose-wayland",
+          "-W",
+          width_arg,
+          "-H",
+          height_arg,
+          "-w",
+          width_arg,
+          "-h",
+          height_arg,
+          "-r",
+          refresh_arg
+        };
+        args.insert(args.end(), extra_args.begin(), extra_args.end());
+        args.insert(args.end(), {"--", "/bin/sh", "-lc", command});
+
+        std::vector<char *> argv;
+        argv.reserve(args.size() + 1);
+        for (auto &arg : args) {
+          argv.push_back(arg.data());
+        }
+        argv.push_back(nullptr);
+
+        execvp(binary.c_str(), argv.data());
+        _exit(127);
+      }
+
+      ::close(pipe_fds[1]);
+      log_thread = std::thread([this, fd = pipe_fds[0]]() {
+        read_log(fd);
+      });
+
+      std::unique_lock lock(mutex);
+      bool node_ready = cv.wait_for(lock, 7s, [this]() {
+        return (pipewire_node_id != 0 && !wayland_display.empty()) || exited;
+      });
+      if (!node_ready || pipewire_node_id == 0) {
+        lock.unlock();
+        BOOST_LOG(error) << "[VDISPLAY] Timed out waiting for Gamescope PipeWire node for " << display_name;
+        stop();
+        return false;
+      }
+
+      if (ei_socket.empty()) {
+        ei_socket = xdg_runtime_path() + "/" + wayland_display + "-ei";
+      }
+      auto socket_path = ei_socket;
+      auto node = pipewire_node_id;
+      auto launch_env = launch_environment_locked();
+      lock.unlock();
+
+      ei_client = std::make_shared<gamescope_ei_client_t>();
+      if (!ei_client->start(socket_path)) {
+        BOOST_LOG(warning) << "[VDISPLAY] Gamescope input will fall back to the host input path.";
+      }
+
+      BOOST_LOG(info) << "[VDISPLAY] Gamescope session for " << display_name
+                      << " is ready: pipewire_node=" << node
+                      << " wayland_display=" << launch_env.wayland_display
+                      << " x11_display=" << (launch_env.x11_display.empty() ? "(pending)" : launch_env.x11_display)
+                      << " ei_socket=" << socket_path;
+      return true;
+    }
+
+    void stop() {
+      if (ei_client) {
+        ei_client->stop();
+        ei_client.reset();
+      }
+
+      pid_t local_pid = pid.exchange(-1);
+      if (local_pid > 0) {
+        ::kill(-local_pid, SIGTERM);
+        for (int attempt = 0; attempt < 20; ++attempt) {
+          int status {};
+          auto result = waitpid(local_pid, &status, WNOHANG);
+          if (result == local_pid || result < 0) {
+            local_pid = -1;
+            break;
+          }
+          std::this_thread::sleep_for(100ms);
+        }
+        if (local_pid > 0) {
+          ::kill(-local_pid, SIGKILL);
+          waitpid(local_pid, nullptr, 0);
+        }
+      }
+
+      if (log_thread.joinable()) {
+        log_thread.join();
+      }
+    }
+
+    uint32_t node_id() const {
+      std::lock_guard lock(mutex);
+      return pipewire_node_id;
+    }
+
+    std::shared_ptr<gamescope_ei_client_t> input() const {
+      return ei_client;
+    }
+
+    gamescope_launch_environment_t launch_environment() const {
+      std::lock_guard lock(mutex);
+      return launch_environment_locked();
+    }
+
+  private:
+	    static std::string session_command() {
+      const char *command_override = std::getenv("APOLLO_GAMESCOPE_COMMAND");
+      if (command_override && *command_override) {
+        BOOST_LOG(info) << "[VDISPLAY] APOLLO_GAMESCOPE_COMMAND override is active.";
+        return command_override;
+      }
+
+      if (!config::video.linux_gamescope_session_command.empty()) {
+        return config::video.linux_gamescope_session_command;
+      }
+
+      BOOST_LOG(info) << "[VDISPLAY] No Gamescope session command configured; using a sleep supervisor.";
+	      return "sleep infinity";
+	    }
+
+	    static std::vector<std::string> gamescope_extra_args() {
+	      const char *args_override = std::getenv("APOLLO_GAMESCOPE_FLAGS");
+	      if (!args_override || !*args_override) {
+	        return {};
+	      }
+
+	      BOOST_LOG(info) << "[VDISPLAY] APOLLO_GAMESCOPE_FLAGS override is active: " << args_override;
+	      std::istringstream stream(args_override);
+	      std::vector<std::string> args;
+	      std::string arg;
+	      while (stream >> arg) {
+	        args.push_back(std::move(arg));
+	      }
+	      return args;
+	    }
+
+	    gamescope_launch_environment_t launch_environment_locked() const {
+      return {
+        wayland_display,
+        x11_display,
+        ei_socket
+      };
+    }
+
+    void read_log(int fd) {
+      FILE *stream = fdopen(fd, "r");
+      if (!stream) {
+        ::close(fd);
+        return;
+      }
+
+      char *line = nullptr;
+      size_t len = 0;
+      while (getline(&line, &len, stream) != -1) {
+        std::string text(line);
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
+          text.pop_back();
+        }
+        if (!text.empty()) {
+          BOOST_LOG(info) << "[GAMESCOPE] " << text;
+          parse_log_line(text);
+        }
+      }
+      free(line);
+      fclose(stream);
+
+      {
+        std::lock_guard lock(mutex);
+        exited = true;
+      }
+      cv.notify_all();
+    }
+
+    void parse_log_line(const std::string &line) {
+      constexpr std::string_view node_marker = "stream available on node ID: ";
+      auto node_pos = line.find(node_marker);
+      if (node_pos != std::string::npos) {
+        auto value = line.substr(node_pos + node_marker.size());
+        char *end {};
+        auto node = std::strtoul(value.c_str(), &end, 10);
+        if (node > 0) {
+          {
+            std::lock_guard lock(mutex);
+            pipewire_node_id = static_cast<uint32_t>(node);
+          }
+          cv.notify_all();
+        }
+      }
+
+      constexpr std::string_view display_marker = "Running compositor on wayland display '";
+      auto display_pos = line.find(display_marker);
+      if (display_pos != std::string::npos) {
+        auto start = display_pos + display_marker.size();
+        auto end = line.find('\'', start);
+        if (end != std::string::npos && end > start) {
+          auto wayland_display = line.substr(start, end - start);
+          {
+            std::lock_guard lock(mutex);
+            this->wayland_display = wayland_display;
+            ei_socket = xdg_runtime_path() + "/" + wayland_display + "-ei";
+          }
+          cv.notify_all();
+        }
+      }
+
+      constexpr std::string_view xwayland_marker = "Starting Xwayland on ";
+      auto xwayland_pos = line.find(xwayland_marker);
+      if (xwayland_pos != std::string::npos) {
+        auto value = line.substr(xwayland_pos + xwayland_marker.size());
+        auto end = value.find_first_of(" \t\r\n");
+        if (end != std::string::npos) {
+          value.resize(end);
+        }
+        if (!value.empty()) {
+          std::lock_guard lock(mutex);
+          x11_display = value;
+        }
+      }
+    }
+
+    mutable std::mutex mutex;
+    std::condition_variable cv;
+    std::atomic<pid_t> pid {-1};
+    std::thread log_thread;
+    uint32_t pipewire_node_id {};
+    std::string wayland_display;
+    std::string x11_display;
+    std::string ei_socket;
+    bool exited {};
+    std::shared_ptr<gamescope_ei_client_t> ei_client;
+  };
+
   bool should_run_evdi_painter(BACKEND backend) {
     if (std::getenv("APOLLO_EVDI_FORCE_PAINTER") != nullptr) {
       return true;
@@ -852,6 +1645,8 @@ namespace VDISPLAY {
     bool active;
     bool using_evdi;       // true if the backend owns a real EVDI monitor
     std::shared_ptr<evdi_painter_t> painter;
+    std::shared_ptr<gamescope_session_t> gamescope;
+    gamescope_cursor_state_t gamescope_cursor;
 #ifdef SUNSHINE_BUILD_PIPEWIRE
     GDBusConnection *mutter_bus {};
     std::string mutter_remote_desktop_session_path;
@@ -896,6 +1691,9 @@ namespace VDISPLAY {
     }
     if (backend == "mutter" || backend == "mutter_pipewire" || backend == "mutter-pipewire" || backend == "pipewire") {
       return BACKEND::MUTTER_PIPEWIRE;
+    }
+    if (backend == "gamescope" || backend == "gamescope_pipewire" || backend == "gamescope-pipewire" || backend == "remote_session" || backend == "remote-session") {
+      return BACKEND::GAMESCOPE_PIPEWIRE;
     }
     if (backend == "evdi" || backend == "evdi_kms" || backend == "evdi-kms") {
       return BACKEND::EVDI;
@@ -1014,6 +1812,8 @@ namespace VDISPLAY {
     switch (backend) {
       case BACKEND::MUTTER_PIPEWIRE:
         return "Mutter RecordVirtual/PipeWire";
+      case BACKEND::GAMESCOPE_PIPEWIRE:
+        return "Gamescope headless/PipeWire";
       case BACKEND::EVDI_PIPEWIRE:
         return "EVDI monitor/PipeWire";
       case BACKEND::EVDI:
@@ -2128,6 +2928,25 @@ print(
       return driver_status;
     }
 
+    if (selected_backend == BACKEND::GAMESCOPE_PIPEWIRE) {
+#ifndef SUNSHINE_BUILD_PIPEWIRE
+      BOOST_LOG(error) << "[VDISPLAY] Gamescope backend requires PipeWire support.";
+      driver_status = DRIVER_STATUS::NOT_SUPPORTED;
+      return driver_status;
+#endif
+      evdi_available = false;
+      auto binary = gamescope_binary();
+      if (!gamescope_binary_available(binary)) {
+        BOOST_LOG(error) << "[VDISPLAY] Gamescope backend requested, but Gamescope binary is not executable: " << binary;
+        driver_status = DRIVER_STATUS::NOT_SUPPORTED;
+        return driver_status;
+      }
+
+      driver_status = DRIVER_STATUS::OK;
+      BOOST_LOG(info) << "[VDISPLAY] Linux virtual display driver initialized with Gamescope/PipeWire.";
+      return driver_status;
+    }
+
     evdi_available = load_evdi_library();
 
     if (evdi_available) {
@@ -2177,6 +2996,9 @@ print(
           destroy_mutter_virtual_stream(vdinfo);
         }
 #endif
+        if (vdinfo.gamescope) {
+          vdinfo.gamescope->stop();
+        }
         if (vdinfo.using_evdi && vdinfo.handle) {
           if (vdinfo.painter) {
             vdinfo.painter->stop();
@@ -2294,6 +3116,10 @@ print(
     vdinfo.drm_fd = -1;
     vdinfo.active = true;
     vdinfo.using_evdi = false;
+    vdinfo.gamescope_cursor.x = static_cast<double>(width) / 2.0;
+    vdinfo.gamescope_cursor.y = static_cast<double>(height) / 2.0;
+    vdinfo.gamescope_cursor.width = width;
+    vdinfo.gamescope_cursor.height = height;
 
     if (selected_backend == BACKEND::MUTTER_PIPEWIRE) {
 #ifdef SUNSHINE_BUILD_PIPEWIRE
@@ -2305,6 +3131,12 @@ print(
       BOOST_LOG(error) << "[VDISPLAY] Mutter/PipeWire backend is not compiled in.";
       return "";
 #endif
+    } else if (selected_backend == BACKEND::GAMESCOPE_PIPEWIRE) {
+      vdinfo.gamescope = std::make_shared<gamescope_session_t>();
+      if (!vdinfo.gamescope->start(display_name, width, height, fps_hz)) {
+        BOOST_LOG(error) << "[VDISPLAY] Gamescope/PipeWire virtual display creation failed for " << display_name;
+        return "";
+      }
     } else if ((selected_backend == BACKEND::EVDI || selected_backend == BACKEND::EVDI_PIPEWIRE) && evdi_available) {
       // Create real virtual display using EVDI
       int device = find_available_evdi_device();
@@ -2387,6 +3219,9 @@ print(
       destroy_mutter_virtual_stream(vdinfo);
     }
 #endif
+    if (vdinfo.gamescope) {
+      vdinfo.gamescope->stop();
+    }
 
     if (vdinfo.using_evdi && vdinfo.handle) {
       if (vdinfo.painter) {
@@ -2437,6 +3272,15 @@ print(
                                << vdinfo.name << " will keep its active PipeWire mode until the next session.";
           }
           BOOST_LOG(info) << "[VDISPLAY] Mutter/PipeWire virtual display mode recorded successfully.";
+          return 0;
+        }
+
+        if (vdinfo.backend == BACKEND::GAMESCOPE_PIPEWIRE) {
+          if (!mode_unchanged) {
+            BOOST_LOG(warning) << "[VDISPLAY] Gamescope virtual display mode changes require session recreation; "
+                               << vdinfo.name << " will keep its active PipeWire mode until the next session.";
+          }
+          BOOST_LOG(info) << "[VDISPLAY] Gamescope virtual display mode recorded successfully.";
           return 0;
         }
 
@@ -2610,6 +3454,120 @@ print(
     return false;
   }
 
+  bool getGamescopePipeWireNodeId(const std::string &displayName, uint32_t &node_id) {
+    std::lock_guard<std::mutex> lock(vdisplay_mutex);
+    for (const auto &[guid, vdinfo] : virtual_displays) {
+      if (vdinfo.active && vdinfo.name == displayName && vdinfo.backend == BACKEND::GAMESCOPE_PIPEWIRE && vdinfo.gamescope) {
+        node_id = vdinfo.gamescope->node_id();
+        return node_id != 0;
+      }
+    }
+    return false;
+  }
+
+  bool getGamescopeLaunchEnvironment(const std::string &displayName, gamescope_launch_environment_t &environment) {
+    std::lock_guard<std::mutex> lock(vdisplay_mutex);
+    for (const auto &[guid, vdinfo] : virtual_displays) {
+      if (vdinfo.active && vdinfo.name == displayName && vdinfo.backend == BACKEND::GAMESCOPE_PIPEWIRE && vdinfo.gamescope) {
+        environment = vdinfo.gamescope->launch_environment();
+        return !environment.wayland_display.empty();
+      }
+    }
+    return false;
+  }
+
+  bool getGamescopeCursorState(const std::string &displayName, gamescope_cursor_state_t &state) {
+    std::lock_guard<std::mutex> lock(vdisplay_mutex);
+    for (const auto &[guid, vdinfo] : virtual_displays) {
+      if (vdinfo.active && vdinfo.name == displayName && vdinfo.backend == BACKEND::GAMESCOPE_PIPEWIRE) {
+        state = vdinfo.gamescope_cursor;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  struct gamescope_input_target_t {
+    std::string guid;
+    std::shared_ptr<gamescope_ei_client_t> input;
+  };
+
+  static std::optional<gamescope_input_target_t> active_gamescope_input_target() {
+    std::lock_guard<std::mutex> lock(vdisplay_mutex);
+    for (const auto &[guid, vdinfo] : virtual_displays) {
+      if (vdinfo.active && vdinfo.backend == BACKEND::GAMESCOPE_PIPEWIRE && vdinfo.gamescope) {
+        return gamescope_input_target_t {
+          guid,
+          vdinfo.gamescope->input()
+        };
+      }
+    }
+    return std::nullopt;
+  }
+
+  static void update_gamescope_cursor_absolute(const std::string &guid, double x, double y) {
+    std::lock_guard<std::mutex> lock(vdisplay_mutex);
+    auto it = virtual_displays.find(guid);
+    if (it == virtual_displays.end() || !it->second.active || it->second.backend != BACKEND::GAMESCOPE_PIPEWIRE) {
+      return;
+    }
+
+    auto &cursor = it->second.gamescope_cursor;
+    cursor.width = it->second.width;
+    cursor.height = it->second.height;
+    cursor.x = std::clamp(x, 0.0, cursor.width > 0 ? static_cast<double>(cursor.width - 1) : 0.0);
+    cursor.y = std::clamp(y, 0.0, cursor.height > 0 ? static_cast<double>(cursor.height - 1) : 0.0);
+    cursor.visible = true;
+    ++cursor.serial;
+  }
+
+  static void update_gamescope_cursor_relative(const std::string &guid, double dx, double dy) {
+    std::lock_guard<std::mutex> lock(vdisplay_mutex);
+    auto it = virtual_displays.find(guid);
+    if (it == virtual_displays.end() || !it->second.active || it->second.backend != BACKEND::GAMESCOPE_PIPEWIRE) {
+      return;
+    }
+
+    auto &cursor = it->second.gamescope_cursor;
+    cursor.width = it->second.width;
+    cursor.height = it->second.height;
+    if (!cursor.visible) {
+      cursor.x = static_cast<double>(cursor.width) / 2.0;
+      cursor.y = static_cast<double>(cursor.height) / 2.0;
+    }
+    cursor.x = std::clamp(cursor.x + dx, 0.0, cursor.width > 0 ? static_cast<double>(cursor.width - 1) : 0.0);
+    cursor.y = std::clamp(cursor.y + dy, 0.0, cursor.height > 0 ? static_cast<double>(cursor.height - 1) : 0.0);
+    cursor.visible = true;
+    ++cursor.serial;
+  }
+
+  static std::optional<int> gamescope_ei_button_code(int button) {
+    switch (button) {
+      case 0x01:
+        return BTN_LEFT;
+      case 0x02:
+        return BTN_MIDDLE;
+      case 0x03:
+        return BTN_RIGHT;
+      case 0x04:
+        return BTN_SIDE;
+      case 0x05:
+        return BTN_EXTRA;
+      default:
+        return std::nullopt;
+    }
+  }
+
+  static std::shared_ptr<gamescope_ei_client_t> active_gamescope_input() {
+    std::lock_guard<std::mutex> lock(vdisplay_mutex);
+    for (const auto &[guid, vdinfo] : virtual_displays) {
+      if (vdinfo.active && vdinfo.backend == BACKEND::GAMESCOPE_PIPEWIRE && vdinfo.gamescope) {
+        return vdinfo.gamescope->input();
+      }
+    }
+    return nullptr;
+  }
+
 #ifdef SUNSHINE_BUILD_PIPEWIRE
   struct mutter_remote_desktop_target_t {
     GDBusConnection *bus {};
@@ -2773,6 +3731,40 @@ print(
     (void) dy;
     return false;
 #endif
+  }
+
+  bool notifyGamescopePointerMotionRelative(double dx, double dy) {
+    auto target = active_gamescope_input_target();
+    if (!target || !target->input || !target->input->pointer_motion_relative(dx, dy)) {
+      return false;
+    }
+    update_gamescope_cursor_relative(target->guid, dx, dy);
+    return true;
+  }
+
+  bool notifyGamescopePointerMotionAbsolute(double x, double y) {
+    auto target = active_gamescope_input_target();
+    if (!target || !target->input || !target->input->pointer_motion_absolute(x, y)) {
+      return false;
+    }
+    update_gamescope_cursor_absolute(target->guid, x, y);
+    return true;
+  }
+
+  bool notifyGamescopePointerButton(int button, bool release) {
+    auto input = active_gamescope_input();
+    auto mapped_button = gamescope_ei_button_code(button);
+    return input && mapped_button && input->pointer_button(*mapped_button, release);
+  }
+
+  bool notifyGamescopePointerAxis(double dx, double dy) {
+    auto input = active_gamescope_input();
+    return input && input->pointer_axis(dx, dy);
+  }
+
+  bool notifyGamescopeKeyboardKey(uint16_t modcode, bool release) {
+    auto input = active_gamescope_input();
+    return input && input->keyboard_key(modcode, release);
   }
 
   // ============================================================================

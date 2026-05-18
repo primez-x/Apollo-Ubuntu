@@ -229,6 +229,7 @@ function add_debian_based_deps() {
     "libcap-dev"  # KMS
     "libcurl4-openssl-dev"
     "libdrm-dev"  # KMS
+    "libei-dev"  # Gamescope EI input
     "libevdev-dev"
     "libgbm-dev"
     "libglib2.0-dev"  # GIO/GDBus for GNOME Mutter ScreenCast

@@ -358,6 +358,27 @@ namespace proc {
               BOOST_LOG(info) << "Using EVDI virtual display [" << this->display_name << "] for Mutter/PipeWire monitor capture.";
             } else if (backend == VDISPLAY::BACKEND::MUTTER_PIPEWIRE) {
               BOOST_LOG(info) << "Using Mutter/PipeWire virtual display [" << this->display_name << "] for direct GNOME capture.";
+            } else if (backend == VDISPLAY::BACKEND::GAMESCOPE_PIPEWIRE) {
+              BOOST_LOG(info) << "Using Gamescope/PipeWire virtual display [" << this->display_name << "] for Apollo-owned remote session capture.";
+              VDISPLAY::gamescope_launch_environment_t gamescope_env;
+              if (VDISPLAY::getGamescopeLaunchEnvironment(this->display_name, gamescope_env)) {
+                _env["WAYLAND_DISPLAY"] = gamescope_env.wayland_display;
+                _env["GAMESCOPE_WAYLAND_DISPLAY"] = gamescope_env.wayland_display;
+                _env["XDG_SESSION_TYPE"] = "wayland";
+                _env["XDG_CURRENT_DESKTOP"] = "gamescope";
+                if (!gamescope_env.x11_display.empty()) {
+                  _env["DISPLAY"] = gamescope_env.x11_display;
+                }
+                if (!gamescope_env.ei_socket.empty()) {
+                  _env["LIBEI_SOCKET"] = gamescope_env.ei_socket;
+                }
+                BOOST_LOG(info) << "Launching app commands inside Gamescope session: WAYLAND_DISPLAY="
+                                << gamescope_env.wayland_display
+                                << " DISPLAY=" << (gamescope_env.x11_display.empty() ? "(unset)" : gamescope_env.x11_display)
+                                << " LIBEI_SOCKET=" << (gamescope_env.ei_socket.empty() ? "(unset)" : gamescope_env.ei_socket);
+              } else {
+                BOOST_LOG(warning) << "Gamescope launch environment is not available; app commands may open on the host desktop.";
+              }
             } else {
               BOOST_LOG(info) << "Using Apollo virtual display [" << this->display_name << "].";
             }

@@ -122,6 +122,7 @@ const validateFallbackMode = (event) => {
       <label for="linux_virtual_display_backend" class="form-label">{{ $t('config.linux_virtual_display_backend') }}</label>
       <select class="form-select" id="linux_virtual_display_backend" v-model="config.linux_virtual_display_backend">
         <option value="auto">auto</option>
+        <option value="gamescope">gamescope</option>
         <option value="mutter">mutter</option>
         <option value="evdi">evdi</option>
       </select>
@@ -146,6 +147,14 @@ const validateFallbackMode = (event) => {
         <option value="force">force</option>
       </select>
       <div class="form-text">{{ $t('config.linux_pipewire_dmabuf_desc') }}</div>
+    </div>
+
+    <div class="mb-3" v-if="platform === 'linux' && config.linux_virtual_display_backend === 'gamescope'">
+      <label for="linux_gamescope_session_command" class="form-label">{{ $t('config.linux_gamescope_session_command') }}</label>
+      <input type="text" class="form-control monospace" id="linux_gamescope_session_command"
+             placeholder="sleep infinity"
+             v-model="config.linux_gamescope_session_command" />
+      <div class="form-text">{{ $t('config.linux_gamescope_session_command_desc') }}</div>
     </div>
 
     <DisplayDeviceOptions

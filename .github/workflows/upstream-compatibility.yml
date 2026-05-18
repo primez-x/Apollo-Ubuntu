@@ -45,6 +45,7 @@ jobs:
             libcap-dev \
             libcurl4-openssl-dev \
             libdrm-dev \
+            libei-dev \
             libevdev-dev \
             libgbm-dev \
             libglib2.0-dev \

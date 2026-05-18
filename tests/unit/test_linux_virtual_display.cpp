@@ -14,6 +14,9 @@ TEST(LinuxVirtualDisplayBackendTest, ParsesSupportedBackendAliases) {
   EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("evdi-pipewire"), VDISPLAY::BACKEND::EVDI_PIPEWIRE);
   EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("mutter"), VDISPLAY::BACKEND::MUTTER_PIPEWIRE);
   EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("pipewire"), VDISPLAY::BACKEND::MUTTER_PIPEWIRE);
+  EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("gamescope"), VDISPLAY::BACKEND::GAMESCOPE_PIPEWIRE);
+  EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("gamescope-pipewire"), VDISPLAY::BACKEND::GAMESCOPE_PIPEWIRE);
+  EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("remote-session"), VDISPLAY::BACKEND::GAMESCOPE_PIPEWIRE);
   EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("evdi"), VDISPLAY::BACKEND::EVDI);
   EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("evdi-kms"), VDISPLAY::BACKEND::EVDI);
 }

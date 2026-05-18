@@ -21,14 +21,16 @@
     },
     {
       "name": "Steam Big Picture",
+      "cmd": "apollo-steam-big-picture-session",
+      "auto-detach": false,
+      "wait-all": false,
+      "terminate-on-pause": true,
+      "exit-timeout": 10,
       "prep-cmd": [
         {
           "do": "",
-          "undo": "setsid steam steam://close/bigpicture"
+          "undo": "apollo-steam-big-picture-session --shutdown"
         }
-      ],
-      "detached": [
-        "setsid steam steam://open/bigpicture"
       ],
       "image-path": "steam.png"
     }

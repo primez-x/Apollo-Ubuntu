@@ -161,6 +161,14 @@ if(PIPEWIRE_FOUND)
             "${CMAKE_SOURCE_DIR}/src/platform/linux/pipewiregrab.cpp")
 endif()
 
+pkg_check_modules(LIBEI libei-1.0)
+if(LIBEI_FOUND)
+    add_compile_definitions(SUNSHINE_BUILD_LIBEI)
+    include_directories(SYSTEM ${LIBEI_INCLUDE_DIRS})
+    link_directories(${LIBEI_LIBRARY_DIRS})
+    list(APPEND PLATFORM_LIBRARIES ${LIBEI_LIBRARIES})
+endif()
+
 # x11
 if(${SUNSHINE_ENABLE_X11})
     find_package(X11 REQUIRED)

@@ -25,7 +25,23 @@ namespace VDISPLAY {
     UNKNOWN,
     EVDI_PIPEWIRE,
     MUTTER_PIPEWIRE,
+    GAMESCOPE_PIPEWIRE,
     EVDI
+  };
+
+  struct gamescope_launch_environment_t {
+    std::string wayland_display;
+    std::string x11_display;
+    std::string ei_socket;
+  };
+
+  struct gamescope_cursor_state_t {
+    double x {};
+    double y {};
+    uint32_t width {};
+    uint32_t height {};
+    uint64_t serial {};
+    bool visible {};
   };
 
   /**
@@ -232,6 +248,24 @@ namespace VDISPLAY {
   bool getMutterPipeWireNodeId(const std::string &displayName, uint32_t &node_id);
 
   /**
+   * @brief Get the PipeWire node id for a Gamescope-owned virtual display.
+   * @param displayName The virtual display name.
+   * @param node_id Output PipeWire node id.
+   * @return true if the node id is available.
+   */
+  bool getGamescopePipeWireNodeId(const std::string &displayName, uint32_t &node_id);
+
+  /**
+   * @brief Get the client launch environment for a Gamescope-owned virtual display.
+   * @param displayName The virtual display name.
+   * @param environment Output compositor display environment.
+   * @return true if the environment is available.
+   */
+  bool getGamescopeLaunchEnvironment(const std::string &displayName, gamescope_launch_environment_t &environment);
+
+  bool getGamescopeCursorState(const std::string &displayName, gamescope_cursor_state_t &state);
+
+  /**
    * @brief Send relative pointer motion to the active Mutter remote desktop virtual display.
    * @param dx Horizontal movement delta.
    * @param dy Vertical movement delta.
@@ -262,6 +296,16 @@ namespace VDISPLAY {
    * @return true if the event was queued to Mutter.
    */
   bool notifyMutterPointerAxis(double dx, double dy);
+
+  bool notifyGamescopePointerMotionRelative(double dx, double dy);
+
+  bool notifyGamescopePointerMotionAbsolute(double x, double y);
+
+  bool notifyGamescopePointerButton(int button, bool release);
+
+  bool notifyGamescopePointerAxis(double dx, double dy);
+
+  bool notifyGamescopeKeyboardKey(uint16_t modcode, bool release);
 
   /**
    * @brief Check if a display is an EVDI virtual display.

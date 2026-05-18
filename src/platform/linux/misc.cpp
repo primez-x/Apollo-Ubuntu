@@ -1044,7 +1044,8 @@ std::string get_local_ip_for_gateway() {
     if (display_name.rfind("VIRTUAL-", 0) == 0) {
       const auto backend = VDISPLAY::virtualDisplayBackend(display_name);
       if (backend == VDISPLAY::BACKEND::MUTTER_PIPEWIRE ||
-          backend == VDISPLAY::BACKEND::EVDI_PIPEWIRE) {
+          backend == VDISPLAY::BACKEND::EVDI_PIPEWIRE ||
+          backend == VDISPLAY::BACKEND::GAMESCOPE_PIPEWIRE) {
         const char *capture_override = std::getenv("APOLLO_LINUX_VIRTUAL_CAPTURE");
         if (capture_override && *capture_override && !VDISPLAY::parseLinuxVirtualCaptureBackend(capture_override)) {
           BOOST_LOG(warning) << "Unknown APOLLO_LINUX_VIRTUAL_CAPTURE=" << capture_override << "; ignoring environment override.";

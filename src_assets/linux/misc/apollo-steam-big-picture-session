@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+set -u
+
+log() {
+  printf '[apollo-steam-session] %s\n' "$*" >&2
+}
+
+steam_bin="${APOLLO_STEAM_BINARY:-$(command -v steam 2>/dev/null || true)}"
+if [[ -z "${steam_bin}" ]]; then
+  log "steam executable not found"
+  exit 127
+fi
+
+shutdown_steam() {
+  local shutdown_timeout="${APOLLO_STEAM_SHUTDOWN_TIMEOUT:-5s}"
+  if [[ "${shutdown_timeout}" =~ ^[0-9]+$ ]]; then
+    shutdown_timeout="${shutdown_timeout}s"
+  fi
+  timeout "${shutdown_timeout}" "${steam_bin}" -shutdown >/dev/null 2>&1 || true
+}
+
+steam_running() {
+  pgrep -u "$(id -u)" -f '/Steam/ubuntu12_32/steam|/usr/lib/steam|/usr/bin/steam' >/dev/null 2>&1
+}
+
+if [[ "${1:-}" == "--shutdown" ]]; then
+  shutdown_steam
+  exit 0
+fi
+
+if [[ "$#" -eq 0 ]]; then
+  set -- -cef-force-gpu steam://open/bigpicture
+fi
+
+if [[ "${APOLLO_STEAM_CLOSE_EXISTING:-1}" != "0" ]] && steam_running; then
+  log "closing existing Steam instance before starting the streaming session"
+  shutdown_steam
+  for _ in $(seq 1 30); do
+    steam_running || break
+    sleep 1
+  done
+fi
+
+cleanup_done=0
+steam_started=0
+cleanup() {
+  if [[ "${cleanup_done}" -eq 1 ]]; then
+    return
+  fi
+  cleanup_done=1
+
+  if [[ "${steam_started}" -eq 1 && "${APOLLO_STEAM_SHUTDOWN_ON_EXIT:-1}" != "0" ]]; then
+    log "shutting down Steam"
+    shutdown_steam
+  fi
+}
+
+handle_signal() {
+  cleanup
+  exit 0
+}
+trap cleanup EXIT
+trap handle_signal HUP INT TERM
+
+log "starting Steam Big Picture with: ${steam_bin} $*"
+if ! setsid -f "${steam_bin}" "$@"; then
+  log "failed to start Steam"
+  exit 1
+fi
+steam_started=1
+
+display="${DISPLAY:-}"
+if [[ -z "${display}" ]]; then
+  log "DISPLAY is not set; keeping supervisor alive until it is terminated"
+  while true; do sleep 3600; done
+fi
+
+if ! command -v xwininfo >/dev/null 2>&1; then
+  log "xwininfo is unavailable; install x11-utils for automatic Big Picture exit detection"
+  while true; do sleep 3600; done
+fi
+
+screen_width="${APOLLO_CLIENT_WIDTH:-${SUNSHINE_CLIENT_WIDTH:-0}}"
+screen_height="${APOLLO_CLIENT_HEIGHT:-${SUNSHINE_CLIENT_HEIGHT:-0}}"
+if [[ "${screen_width}" -le 0 || "${screen_height}" -le 0 ]]; then
+  if command -v xdpyinfo >/dev/null 2>&1; then
+    dimensions="$(xdpyinfo -display "${display}" 2>/dev/null | sed -nE 's/.*dimensions:[[:space:]]+([0-9]+)x([0-9]+).*/\1 \2/p' | head -n1)"
+    if [[ -n "${dimensions}" ]]; then
+      read -r screen_width screen_height <<< "${dimensions}"
+    fi
+  fi
+fi
+
+if [[ "${screen_width}" -le 0 || "${screen_height}" -le 0 ]]; then
+  log "could not determine stream size; keeping supervisor alive until it is terminated"
+  while true; do sleep 3600; done
+fi
+
+min_coverage="${APOLLO_STEAM_BIGPICTURE_MIN_COVERAGE:-85}"
+exit_grace_polls="${APOLLO_STEAM_BIGPICTURE_EXIT_GRACE_POLLS:-3}"
+poll_interval="${APOLLO_STEAM_BIGPICTURE_POLL_INTERVAL:-1}"
+startup_timeout="${APOLLO_STEAM_BIGPICTURE_STARTUP_TIMEOUT:-180}"
+screen_area=$((screen_width * screen_height))
+big_picture_seen=0
+below_threshold_count=0
+started_at="$(date +%s)"
+
+largest_steam_window_area() {
+  DISPLAY="${display}" xwininfo -root -tree 2>/dev/null |
+    sed -nE '/\("(steamwebhelper" "steam"|"steam" "Steam"|"Steam" "Steam")\)/s/.*[[:space:]]([0-9]+)x([0-9]+)[+-][0-9-]+[+-][0-9-]+.*/\1 \2/p' |
+    awk 'BEGIN { max = 0 } { area = $1 * $2; if (area > max) max = area } END { print max }'
+}
+
+while true; do
+  area="$(largest_steam_window_area)"
+  area="${area:-0}"
+  coverage=$((area * 100 / screen_area))
+
+  if [[ "${coverage}" -ge "${min_coverage}" ]]; then
+    if [[ "${big_picture_seen}" -eq 0 ]]; then
+      log "Big Picture fullscreen detected at ${coverage}% coverage"
+    fi
+    big_picture_seen=1
+    below_threshold_count=0
+  elif [[ "${big_picture_seen}" -eq 1 ]]; then
+    below_threshold_count=$((below_threshold_count + 1))
+    if [[ "${below_threshold_count}" -ge "${exit_grace_polls}" ]]; then
+      log "Big Picture left fullscreen coverage (${coverage}%); ending session"
+      exit 0
+    fi
+  else
+    now="$(date +%s)"
+    if [[ $((now - started_at)) -ge "${startup_timeout}" ]]; then
+      log "Big Picture fullscreen was not detected within ${startup_timeout}s; keeping session alive"
+      startup_timeout=2147483647
+    fi
+  fi
+
+  sleep "${poll_interval}"
+done

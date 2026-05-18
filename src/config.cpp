@@ -499,6 +499,7 @@ namespace config {
     "auto",  // linux_virtual_display_backend
     "auto",  // linux_virtual_capture_backend
     "off",  // linux_pipewire_dmabuf
+    {},  // linux_gamescope_session_command
 
     {
       video_t::dd_t::config_option_e::disabled,  // configuration_option
@@ -1187,6 +1188,7 @@ namespace config {
     string_f(vars, "linux_virtual_display_backend", video.linux_virtual_display_backend);
     string_f(vars, "linux_virtual_capture_backend", video.linux_virtual_capture_backend);
     string_f(vars, "linux_pipewire_dmabuf", video.linux_pipewire_dmabuf);
+    string_f(vars, "linux_gamescope_session_command", video.linux_gamescope_session_command);
 
     generic_f(vars, "dd_configuration_option", video.dd.configuration_option, dd::config_option_from_view);
     generic_f(vars, "dd_resolution_option", video.dd.resolution_option, dd::resolution_option_from_view);

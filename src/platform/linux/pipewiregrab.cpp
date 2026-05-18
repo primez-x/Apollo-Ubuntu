@@ -29,6 +29,7 @@
 #include <drm_fourcc.h>
 #include <gio/gio.h>
 #include <pipewire/pipewire.h>
+#include <spa/buffer/meta.h>
 #include <spa/param/buffers.h>
 #include <spa/param/format-utils.h>
 #include <spa/param/video/format-utils.h>
@@ -86,6 +87,72 @@ namespace platf {
 
       const char *pipewire_capture_mode_name(pipewire_capture_mode_e mode) {
         return mode == pipewire_capture_mode_e::DMABUF ? "dmabuf" : "mapped";
+      }
+
+      constexpr std::uint32_t GAMESCOPE_FORMAT_REQUESTED_SIZE = 0x70000;
+      constexpr std::uint32_t GAMESCOPE_FORMAT_FOCUS_APPID = 0x70001;
+      constexpr const char *GAMESCOPE_PIPEWIRE_TARGET = "gamescope";
+
+      constexpr std::array<const char *, 24> SOFTWARE_CURSOR_BITMAP {{
+        "X...............",
+        "XX..............",
+        "XWX.............",
+        "XWWX............",
+        "XWWWX...........",
+        "XWWWWX..........",
+        "XWWWWWX.........",
+        "XWWWWWWX........",
+        "XWWWWWWWX.......",
+        "XWWWWWWWWX......",
+        "XWWWWWWWWWX.....",
+        "XWWWWWWWWWWX....",
+        "XWWWWWWWWWWWX...",
+        "XWWWWWWWWWWWWX..",
+        "XWWWWWWXXXXXXX..",
+        "XWWWXWWX........",
+        "XWWX.XWWX.......",
+        "XWX..XWWX.......",
+        "XX...XWWWX......",
+        "X.....XWWWX.....",
+        "......XWWWX.....",
+        ".......XWWWX....",
+        ".......XWWWX....",
+        "........XXX.....",
+      }};
+
+      void blend_software_cursor(img_t &img, const VDISPLAY::gamescope_cursor_state_t &cursor) {
+        if (!img.data || img.pixel_pitch < 4 || img.row_pitch <= 0 || img.width <= 0 || img.height <= 0 || !cursor.visible) {
+          return;
+        }
+
+        const auto cursor_x = static_cast<int>(cursor.x);
+        const auto cursor_y = static_cast<int>(cursor.y);
+        for (std::size_t y = 0; y < SOFTWARE_CURSOR_BITMAP.size(); ++y) {
+          const auto dst_y = cursor_y + static_cast<int>(y);
+          if (dst_y < 0 || dst_y >= img.height) {
+            continue;
+          }
+
+          const auto *row = SOFTWARE_CURSOR_BITMAP[y];
+          for (int x = 0; row[x] != '\0'; ++x) {
+            const auto pixel = row[x];
+            if (pixel == '.') {
+              continue;
+            }
+
+            const auto dst_x = cursor_x + x;
+            if (dst_x < 0 || dst_x >= img.width) {
+              continue;
+            }
+
+            auto dst = img.data + (static_cast<std::size_t>(dst_y) * img.row_pitch) + (static_cast<std::size_t>(dst_x) * img.pixel_pitch);
+            const auto value = static_cast<std::uint8_t>(pixel == 'W' ? 255 : 0);
+            dst[0] = value;
+            dst[1] = value;
+            dst[2] = value;
+            dst[3] = 0xFF;
+          }
+        }
       }
 
       std::optional<std::uint32_t> pipewire_format_to_drm_fourcc(spa_video_format format) {
@@ -179,14 +246,16 @@ namespace platf {
 	        mem_type = hwdevice_type;
 	        width = config.width;
 	        height = config.height;
+        const auto virtual_backend = VDISPLAY::virtualDisplayBackend(display_name);
+        gamescope_pipewire_capture = virtual_backend == VDISPLAY::BACKEND::GAMESCOPE_PIPEWIRE;
 	        configure_dmabuf_policy();
 	        std::uint32_t requested_framerate_override {};
         std::uint32_t virtual_width {};
         std::uint32_t virtual_height {};
         std::uint32_t virtual_fps {};
-        const auto virtual_backend = VDISPLAY::virtualDisplayBackend(display_name);
         if ((virtual_backend == VDISPLAY::BACKEND::MUTTER_PIPEWIRE ||
-             virtual_backend == VDISPLAY::BACKEND::EVDI_PIPEWIRE) &&
+             virtual_backend == VDISPLAY::BACKEND::EVDI_PIPEWIRE ||
+             virtual_backend == VDISPLAY::BACKEND::GAMESCOPE_PIPEWIRE) &&
             VDISPLAY::getVirtualDisplayMode(display_name, virtual_width, virtual_height, virtual_fps)) {
           width = static_cast<int>(virtual_width);
           height = static_cast<int>(virtual_height);
@@ -214,15 +283,15 @@ namespace platf {
         return 0;
 	      }
 
-		      capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *) override {
+		      capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
 	        if (active_capture_mode == pipewire_capture_mode_e::DMABUF) {
 	          return capture_dmabuf(push_captured_image_cb, pull_free_image_cb);
 	        }
 
-	        return capture_mapped(push_captured_image_cb, pull_free_image_cb);
+	        return capture_mapped(push_captured_image_cb, pull_free_image_cb, cursor && *cursor);
 	      }
 
-	      capture_e capture_mapped(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb) {
+	      capture_e capture_mapped(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool cursor_enabled) {
 		        capture_diag_at = std::chrono::steady_clock::now();
 		        capture_frames = 0;
 	        capture_new_frames = 0;
@@ -242,7 +311,10 @@ namespace platf {
 	          {
 	            std::unique_lock lock(frame_mutex);
 	            auto wanted_generation = consumed_generation;
+	            lock.unlock();
 	            auto wait_start = std::chrono::steady_clock::now();
+	            trigger_pipewire_process();
+	            lock.lock();
 	            frame_cv.wait_for(lock, frame_interval, [&]() {
 	              return !running || latest_generation != wanted_generation;
 	            });
@@ -252,7 +324,16 @@ namespace platf {
 	              return capture_e::interrupted;
 	            }
 
-	            if (!latest_pixels.empty() && latest_generation != consumed_generation) {
+	            VDISPLAY::gamescope_cursor_state_t cursor_state;
+	            const bool should_overlay_cursor =
+	              gamescope_pipewire_capture &&
+	              cursor_enabled &&
+	              VDISPLAY::getGamescopeCursorState(display_name, cursor_state) &&
+	              cursor_state.visible;
+	            const bool frame_changed = latest_generation != consumed_generation;
+	            const bool cursor_changed = should_overlay_cursor && cursor_state.serial != consumed_cursor_serial;
+
+	            if (!latest_pixels.empty() && (frame_changed || cursor_changed)) {
 	              auto copy_start = std::chrono::steady_clock::now();
 	              const auto copy_height = std::min<int>(height, latest_height);
 	              const auto copy_width = std::min<int>(width, latest_width);
@@ -261,8 +342,16 @@ namespace platf {
 	                auto dst = img->data + (static_cast<std::size_t>(y) * img->row_pitch);
 	                std::memcpy(dst, src, static_cast<std::size_t>(copy_width) * 4);
 	              }
+	              if (should_overlay_cursor) {
+	                if (!logged_software_cursor_overlay) {
+	                  logged_software_cursor_overlay = true;
+	                  BOOST_LOG(info) << "Gamescope PipeWire software cursor overlay is active for " << display_name << '.';
+	                }
+	                blend_software_cursor(*img, cursor_state);
+	                consumed_cursor_serial = cursor_state.serial;
+	              }
 	              copy_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - copy_start).count();
-	              img->frame_timestamp = latest_timestamp;
+	              img->frame_timestamp = frame_changed ? latest_timestamp : std::chrono::steady_clock::now();
 	              consumed_generation = latest_generation;
 	              copied = true;
 	            }
@@ -297,7 +386,10 @@ namespace platf {
 	          {
 	            std::unique_lock lock(frame_mutex);
 	            auto wanted_generation = consumed_generation;
+	            lock.unlock();
 	            auto wait_start = std::chrono::steady_clock::now();
+	            trigger_pipewire_process();
+	            lock.lock();
 	            frame_cv.wait_for(lock, frame_interval, [&]() {
 	              return !running || latest_generation != wanted_generation;
 	            });
@@ -418,43 +510,73 @@ namespace platf {
 	          mem_type == mem_type_e::vaapi ||
 #endif
 	          false;
-	        dmabuf_allowed = dmabuf_policy == VDISPLAY::PIPEWIRE_DMABUF::FORCE && encoder_can_import_dmabuf;
-	        if (dmabuf_policy == VDISPLAY::PIPEWIRE_DMABUF::FORCE && !encoder_can_import_dmabuf) {
-	          dmabuf_policy_error = true;
-	          BOOST_LOG(error) << "PipeWire DMA-BUF capture was forced, but the selected encoder path cannot import DMA-BUF frames.";
-	        } else if (dmabuf_policy == VDISPLAY::PIPEWIRE_DMABUF::AUTO) {
-	          BOOST_LOG(info) << "PipeWire DMA-BUF auto negotiation is disabled pending live validation; using mapped PipeWire frames.";
-	        }
+		        const char *gamescope_dmabuf_override = std::getenv("APOLLO_GAMESCOPE_DMABUF");
+		        const bool gamescope_dmabuf_disabled =
+		          gamescope_dmabuf_override &&
+		          (std::strcmp(gamescope_dmabuf_override, "0") == 0 ||
+		           std::strcmp(gamescope_dmabuf_override, "off") == 0 ||
+		           std::strcmp(gamescope_dmabuf_override, "false") == 0);
+		        dmabuf_allowed = (dmabuf_policy == VDISPLAY::PIPEWIRE_DMABUF::FORCE ||
+		                          (gamescope_pipewire_capture && !gamescope_dmabuf_disabled)) &&
+		                         encoder_can_import_dmabuf;
+		        if (dmabuf_policy == VDISPLAY::PIPEWIRE_DMABUF::FORCE && !encoder_can_import_dmabuf) {
+		          dmabuf_policy_error = true;
+		          BOOST_LOG(error) << "PipeWire DMA-BUF capture was forced, but the selected encoder path cannot import DMA-BUF frames.";
+		        } else if (dmabuf_policy == VDISPLAY::PIPEWIRE_DMABUF::AUTO) {
+		          BOOST_LOG(info) << "PipeWire DMA-BUF auto negotiation is disabled pending live validation; using mapped PipeWire frames.";
+		        } else if (gamescope_pipewire_capture && gamescope_dmabuf_disabled) {
+		          BOOST_LOG(info) << "Gamescope/PipeWire DMA-BUF offer is disabled by APOLLO_GAMESCOPE_DMABUF.";
+		        } else if (gamescope_pipewire_capture && encoder_can_import_dmabuf) {
+		          BOOST_LOG(info) << "Gamescope/PipeWire capture will offer DMA-BUF first to match Gamescope's native stream path.";
+		        }
 
 	        BOOST_LOG(info) << "GNOME PipeWire DMA-BUF policy is "sv << VDISPLAY::linuxPipeWireDmaBufName(dmabuf_policy)
 	                        << "; capture import is " << (dmabuf_allowed ? "eligible" : "mapped");
 	      }
 
-	      void update_buffer_data_type(bool use_dmabuf) {
-	        std::uint8_t params_buffer[256];
-	        spa_pod_builder builder = SPA_POD_BUILDER_INIT(params_buffer, sizeof(params_buffer));
-	        const auto data_types = use_dmabuf ?
-	                                  (1 << SPA_DATA_DmaBuf) :
-	                                  ((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr));
-	        const auto blocks = use_dmabuf ? 1 : 1;
-	        const spa_pod *params[] {
-	          static_cast<const spa_pod *>(spa_pod_builder_add_object(
-	            &builder,
-	            SPA_TYPE_OBJECT_ParamBuffers,
-	            SPA_PARAM_Buffers,
-	            SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(blocks),
-	            SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(data_types)
-	          ))
-	        };
+      void update_buffer_data_type(bool use_dmabuf) {
+        std::uint8_t params_buffer[512];
+        spa_pod_builder builder = SPA_POD_BUILDER_INIT(params_buffer, sizeof(params_buffer));
+        const auto data_types = use_dmabuf ? (1 << SPA_DATA_DmaBuf) :
+                                gamescope_pipewire_capture ? (1 << SPA_DATA_MemFd) :
+                                ((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr));
+        const auto frame_width = latest_width > 0 ? latest_width : width;
+        const auto frame_height = latest_height > 0 ? latest_height : height;
+        const auto stride = frame_width * 4;
+        const auto size = stride * frame_height;
 
-	        if (pw_stream_update_params(stream, params, 1) < 0) {
-	          BOOST_LOG(warning) << "Unable to update PipeWire buffer data type to "
-	                             << (use_dmabuf ? "DMA-BUF" : "mapped memory") << '.';
-	        }
+        std::array<const spa_pod *, 2> params {};
+        std::uint32_t n_params = 0;
+        params[n_params++] = static_cast<const spa_pod *>(spa_pod_builder_add_object(
+            &builder,
+            SPA_TYPE_OBJECT_ParamBuffers,
+            SPA_PARAM_Buffers,
+            SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(4, 2, 8),
+            SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1),
+            SPA_PARAM_BUFFERS_size, SPA_POD_Int(size),
+            SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride),
+            SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(data_types)
+          ));
+        params[n_params++] = static_cast<const spa_pod *>(spa_pod_builder_add_object(
+          &builder,
+          SPA_TYPE_OBJECT_ParamMeta,
+          SPA_PARAM_Meta,
+          SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header),
+          SPA_PARAM_META_size, SPA_POD_Int(sizeof(struct spa_meta_header))
+        ));
+
+        if (pw_stream_update_params(stream, params.data(), n_params) < 0) {
+          BOOST_LOG(warning) << "Unable to update PipeWire buffer data type to "
+                             << (use_dmabuf ? "DMA-BUF" : "mapped memory") << '.';
+        }
 	      }
 
-	      static void on_stream_state_changed(void *data, pw_stream_state, pw_stream_state state, const char *stream_error) {
+	      static void on_stream_state_changed(void *data, pw_stream_state old_state, pw_stream_state state, const char *stream_error) {
 	        auto self = static_cast<pipewire_display_t *>(data);
+	        BOOST_LOG(info) << "PipeWire capture stream state changed for " << self->display_name
+	                        << ": " << pw_stream_state_as_string(old_state)
+	                        << " -> " << pw_stream_state_as_string(state)
+	                        << (stream_error ? stream_error : "");
         if (state == PW_STREAM_STATE_ERROR) {
           BOOST_LOG(error) << "GNOME PipeWire stream error: "sv << (stream_error ? stream_error : "unknown");
           self->running = false;
@@ -655,6 +777,21 @@ namespace platf {
           node_id = backend_node_id;
           owns_mutter_session = false;
           BOOST_LOG(info) << "Using backend-owned Mutter/PipeWire node " << node_id
+                          << " for virtual display [" << display_name << ']';
+          return true;
+        }
+
+        if (VDISPLAY::virtualDisplayBackend(display_name) == VDISPLAY::BACKEND::GAMESCOPE_PIPEWIRE) {
+          std::uint32_t backend_node_id {};
+          if (!VDISPLAY::getGamescopePipeWireNodeId(display_name, backend_node_id)) {
+            BOOST_LOG(error) << "Gamescope/PipeWire virtual display ["sv << display_name
+                             << "] has no PipeWire node; refusing capture fallback."sv;
+            return false;
+          }
+
+          node_id = backend_node_id;
+          owns_mutter_session = false;
+          BOOST_LOG(info) << "Using backend-owned Gamescope/PipeWire node " << node_id
                           << " for virtual display [" << display_name << ']';
           return true;
         }
@@ -969,18 +1106,24 @@ namespace platf {
         events.param_changed = on_stream_param_changed;
         events.process = on_stream_process;
 
-        stream = pw_stream_new_simple(
-          pw_thread_loop_get_loop(loop),
-          "apollo-gnome-screencast",
-          pw_properties_new(
-            PW_KEY_MEDIA_TYPE, "Video",
-            PW_KEY_MEDIA_CATEGORY, "Capture",
-            PW_KEY_MEDIA_ROLE, "Screen",
-            nullptr
-          ),
-          &events,
-          this
+        const auto stream_role = gamescope_pipewire_capture ? "Camera" : "Screen";
+        auto stream_properties = pw_properties_new(
+          PW_KEY_MEDIA_TYPE, "Video",
+          PW_KEY_MEDIA_CATEGORY, "Capture",
+          PW_KEY_MEDIA_ROLE, stream_role,
+          nullptr
         );
+        if (gamescope_pipewire_capture) {
+          pw_properties_set(stream_properties, PW_KEY_TARGET_OBJECT, GAMESCOPE_PIPEWIRE_TARGET);
+        }
+
+        stream = pw_stream_new_simple(
+	          pw_thread_loop_get_loop(loop),
+	          gamescope_pipewire_capture ? "apollo-gamescope-capture" : "apollo-gnome-screencast",
+	          stream_properties,
+	          &events,
+	          this
+	        );
         if (!stream) {
           pw_thread_loop_unlock(loop);
           BOOST_LOG(error) << "Unable to create PipeWire stream."sv;
@@ -989,9 +1132,13 @@ namespace platf {
 
         auto flags = static_cast<pw_stream_flags>(
           PW_STREAM_FLAG_AUTOCONNECT |
-          PW_STREAM_FLAG_MAP_BUFFERS |
-          PW_STREAM_FLAG_RT_PROCESS
+          PW_STREAM_FLAG_MAP_BUFFERS
         );
+        if (gamescope_pipewire_capture) {
+          flags = static_cast<pw_stream_flags>(flags | PW_STREAM_FLAG_DRIVER);
+        } else {
+          flags = static_cast<pw_stream_flags>(flags | PW_STREAM_FLAG_RT_PROCESS);
+        }
 
 	        std::uint8_t params_buffer[4096];
 	        spa_pod_builder builder = SPA_POD_BUILDER_INIT(params_buffer, sizeof(params_buffer));
@@ -1001,27 +1148,34 @@ namespace platf {
 	        const spa_fraction requested_rate {framerate, 1};
 	        const spa_fraction min_rate {1, 1};
 
-	        std::array<const spa_pod *, 4> params {};
-	        std::uint32_t n_params = 0;
+		        std::array<const spa_pod *, 6> params {};
+		        std::uint32_t n_params = 0;
 
-	        if (dmabuf_allowed) {
-	          params[n_params++] = build_pipewire_format(&builder, SPA_VIDEO_FORMAT_BGRx, true, requested_size, min_size, no_fixed_rate, requested_rate, min_rate);
-	          params[n_params++] = build_pipewire_format(&builder, SPA_VIDEO_FORMAT_BGRA, true, requested_size, min_size, no_fixed_rate, requested_rate, min_rate);
-	        }
+		        if (gamescope_pipewire_capture) {
+		          if (dmabuf_allowed) {
+		            params[n_params++] = build_gamescope_pipewire_format(&builder, true, requested_size, min_size, requested_rate);
+		          }
+		          params[n_params++] = build_gamescope_pipewire_format(&builder, false, requested_size, min_size, requested_rate);
+		        } else {
+		          if (dmabuf_allowed) {
+		            params[n_params++] = build_pipewire_format(&builder, SPA_VIDEO_FORMAT_BGRx, true, requested_size, min_size, no_fixed_rate, requested_rate, min_rate);
+		            params[n_params++] = build_pipewire_format(&builder, SPA_VIDEO_FORMAT_BGRA, true, requested_size, min_size, no_fixed_rate, requested_rate, min_rate);
+		          }
 
-	        if (dmabuf_policy != VDISPLAY::PIPEWIRE_DMABUF::FORCE) {
-	          params[n_params++] = static_cast<const spa_pod *>(spa_pod_builder_add_object(
-	            &builder,
-	            SPA_TYPE_OBJECT_Format,
-	            SPA_PARAM_EnumFormat,
-	            SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
-	            SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-	            SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(4, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBA),
-	            SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&requested_size, &min_size, &requested_size),
-	            SPA_FORMAT_VIDEO_framerate, SPA_POD_Fraction(&no_fixed_rate),
-	            SPA_FORMAT_VIDEO_maxFramerate, SPA_POD_CHOICE_RANGE_Fraction(&requested_rate, &min_rate, &requested_rate)
-	          ));
-	        }
+		          if (dmabuf_policy != VDISPLAY::PIPEWIRE_DMABUF::FORCE) {
+		            params[n_params++] = static_cast<const spa_pod *>(spa_pod_builder_add_object(
+		              &builder,
+		              SPA_TYPE_OBJECT_Format,
+		              SPA_PARAM_EnumFormat,
+		              SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+		              SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+		              SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(4, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBA),
+		              SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&requested_size, &min_size, &requested_size),
+		              SPA_FORMAT_VIDEO_framerate, SPA_POD_Fraction(&no_fixed_rate),
+		              SPA_FORMAT_VIDEO_maxFramerate, SPA_POD_CHOICE_RANGE_Fraction(&requested_rate, &min_rate, &requested_rate)
+		            ));
+		          }
+		        }
 
 	        if (n_params == 0) {
 	          BOOST_LOG(error) << "No PipeWire capture formats are available for the selected DMA-BUF policy.";
@@ -1029,17 +1183,36 @@ namespace platf {
 	          return false;
 	        }
 
-	        if (pw_stream_connect(stream, PW_DIRECTION_INPUT, node_id, flags, params.data(), n_params) < 0) {
-	          pw_thread_loop_unlock(loop);
-	          BOOST_LOG(error) << "Unable to connect PipeWire stream to GNOME node " << node_id;
-          return false;
-        }
+		        const auto target_id = gamescope_pipewire_capture ? PW_ID_ANY : node_id;
+		        if (gamescope_pipewire_capture) {
+		          BOOST_LOG(info) << "Connecting Gamescope PipeWire capture via target.object=" << GAMESCOPE_PIPEWIRE_TARGET
+		                          << " node_hint=" << node_id;
+		        }
+		        if (pw_stream_connect(stream, PW_DIRECTION_INPUT, target_id, flags, params.data(), n_params) < 0) {
+		          pw_thread_loop_unlock(loop);
+		          BOOST_LOG(error) << "Unable to connect PipeWire stream to "
+		                           << (gamescope_pipewire_capture ? GAMESCOPE_PIPEWIRE_TARGET : "GNOME node")
+		                           << ' ' << node_id;
+	          return false;
+	        }
 
         if (pw_thread_loop_start(loop) < 0) {
           pw_thread_loop_unlock(loop);
           BOOST_LOG(error) << "Unable to start PipeWire thread loop."sv;
           return false;
         }
+
+	        if (pw_stream_set_active(stream, true) < 0) {
+	          pw_thread_loop_unlock(loop);
+	          BOOST_LOG(error) << "Unable to activate PipeWire capture stream for node " << node_id;
+	          return false;
+	        }
+
+	        if (gamescope_pipewire_capture) {
+	          gamescope_drives_pipewire = pw_stream_is_driving(stream);
+	          BOOST_LOG(info) << "Gamescope PipeWire consumer graph driver is "
+	                          << (gamescope_drives_pipewire ? "active" : "not active");
+	        }
 
 	        pw_thread_loop_unlock(loop);
 
@@ -1069,6 +1242,55 @@ namespace platf {
 	        BOOST_LOG(info) << "GNOME PipeWire capture path selected: "sv << pipewire_capture_mode_name(active_capture_mode);
 	        return true;
 		      }
+
+	      void trigger_pipewire_process() {
+	        if (!gamescope_pipewire_capture || !stream) {
+	          return;
+	        }
+
+	        const auto result = pw_stream_trigger_process(stream);
+	        if (result < 0 && !logged_trigger_failure) {
+	          logged_trigger_failure = true;
+	          BOOST_LOG(warning) << "Unable to trigger Gamescope PipeWire graph processing: " << strerror(-result);
+	        }
+	      }
+
+	      const spa_pod *build_gamescope_pipewire_format(
+	        spa_pod_builder *builder,
+	        bool dmabuf,
+	        const spa_rectangle &requested_size,
+	        const spa_rectangle &min_size,
+	        const spa_fraction &requested_rate
+	      ) {
+	        spa_pod_frame frame {};
+	        const spa_rectangle max_size {65535, 65535};
+	        const spa_fraction min_rate {0, 1};
+	        const std::int64_t focus_appid = 0;
+
+	        spa_pod_builder_push_object(builder, &frame, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
+	        spa_pod_builder_add(
+	          builder,
+	          SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+	          SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+	          SPA_FORMAT_VIDEO_format, SPA_POD_Id(SPA_VIDEO_FORMAT_BGRx),
+	          SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&requested_size, &min_size, &max_size),
+	          SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&requested_rate, &min_rate, &requested_rate),
+	          GAMESCOPE_FORMAT_REQUESTED_SIZE, SPA_POD_Rectangle(&requested_size),
+	          GAMESCOPE_FORMAT_FOCUS_APPID, SPA_POD_Long(focus_appid),
+	          0
+	        );
+
+	        if (dmabuf) {
+	          spa_pod_frame choice {};
+	          spa_pod_builder_prop(builder, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY);
+	          spa_pod_builder_push_choice(builder, &choice, SPA_CHOICE_Enum, 0);
+	          spa_pod_builder_long(builder, DRM_FORMAT_MOD_LINEAR);
+	          spa_pod_builder_long(builder, DRM_FORMAT_MOD_LINEAR);
+	          spa_pod_builder_pop(builder, &choice);
+	        }
+
+	        return static_cast<const spa_pod *>(spa_pod_builder_pop(builder, &frame));
+	      }
 
 	      const spa_pod *build_pipewire_format(
 	        spa_pod_builder *builder,
@@ -1236,6 +1458,7 @@ namespace platf {
 		      int latest_stride {};
 		      std::uint64_t latest_generation {};
 		      std::uint64_t consumed_generation {};
+		      std::uint64_t consumed_cursor_serial {};
 		      std::chrono::steady_clock::time_point latest_timestamp {};
 		      spa_video_format pipewire_format {SPA_VIDEO_FORMAT_UNKNOWN};
 	      std::uint64_t pipewire_modifier {DRM_FORMAT_MOD_INVALID};
@@ -1245,7 +1468,11 @@ namespace platf {
 	      bool dmabuf_policy_error {};
 	      bool format_ready {};
 	      bool format_failed {};
-	      bool logged_unexpected_unmapped_dmabuf {};
+      bool logged_unexpected_unmapped_dmabuf {};
+      bool gamescope_drives_pipewire {};
+      bool logged_trigger_failure {};
+      bool gamescope_pipewire_capture {};
+      bool logged_software_cursor_overlay {};
 		      std::chrono::steady_clock::time_point process_diag_at {};
 	      std::uint64_t process_frames {};
 	      std::uint64_t process_bytes {};

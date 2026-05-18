@@ -106,6 +106,12 @@ sudo apt install evdi-dkms libevdi1 pipewire wireplumber
 sudo modprobe evdi
 ```
 
+For the experimental Gamescope backend, also install:
+
+```bash
+sudo apt install gamescope libei1
+```
+
 Verify the virtual display prerequisites:
 
 ```bash
@@ -224,14 +230,22 @@ Default:
 linux_virtual_display_backend = auto
 linux_virtual_capture_backend = auto
 linux_pipewire_dmabuf = off
+linux_gamescope_session_command =
 ```
 
 `auto` uses the EVDI monitor plus Mutter ScreenCast/PipeWire backend. That is the supported GNOME Wayland path.
 
 Diagnostic alternatives:
 
+- `gamescope`: start an Apollo-owned headless Gamescope compositor and capture its PipeWire node. App commands are launched into the Gamescope Wayland/Xwayland session.
 - `mutter`: GNOME Mutter RecordVirtual/PipeWire without EVDI.
 - `evdi`: direct EVDI/KMS capture.
+
+Gamescope session command:
+
+- `linux_gamescope_session_command =`: leave blank to run a `sleep infinity` supervisor while Apollo launches the selected app into Gamescope.
+- Set it to a long-running command such as a lightweight window manager or diagnostic app when testing the Desktop entry, which otherwise has no app command of its own.
+- `APOLLO_GAMESCOPE_COMMAND` can override this temporarily for live diagnostics.
 
 Capture acceleration:
 

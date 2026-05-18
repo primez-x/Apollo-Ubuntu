@@ -2,6 +2,8 @@
 
 install(DIRECTORY "${SUNSHINE_SOURCE_ASSETS_DIR}/linux/assets/"
         DESTINATION "${SUNSHINE_ASSETS_DIR}")
+install(PROGRAMS "${SUNSHINE_SOURCE_ASSETS_DIR}/linux/misc/apollo-steam-big-picture-session"
+        DESTINATION "${CMAKE_INSTALL_BINDIR}")
 
 # copy assets (excluding shaders) to build directory, for running without install
 file(COPY "${SUNSHINE_SOURCE_ASSETS_DIR}/linux/assets/"
@@ -51,6 +53,7 @@ set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
             libcap2, \
             libcurl4, \
             libdrm2, \
+            libei1, \
             libevdi1, \
             libgbm1, \
             libglib2.0-0t64 | libglib2.0-0, \
@@ -64,7 +67,9 @@ set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
             libwayland-client0, \
             libx11-6, \
             miniupnpc, \
-            openssl | libssl3")
+            openssl | libssl3, \
+            x11-utils")
+set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "gamescope")
 set(CPACK_RPM_PACKAGE_REQUIRES "\
             ${CPACK_RPM_PLATFORM_PACKAGE_REQUIRES} \
             libcap >= 2.22, \
@@ -80,7 +85,8 @@ set(CPACK_RPM_PACKAGE_REQUIRES "\
             numactl-libs >= 2.0.14, \
             openssl >= 3.0.2, \
             pulseaudio-libs >= 10.0, \
-            which >= 2.21")
+            which >= 2.21, \
+            xorg-x11-utils")
 
 if(NOT BOOST_USE_STATIC)
     set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
