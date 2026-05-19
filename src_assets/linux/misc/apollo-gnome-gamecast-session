@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+log_file="${APOLLO_GNOME_GAMECAST_LOG:-/tmp/apollo-gnome-gamecast.log}"
+
+log() {
+  printf '[apollo-gnome-gamecast] %s\n' "$*" | tee -a "${log_file}" >&2
+}
+
+if [[ "${1:-}" == "--shutdown" ]]; then
+  log "shutdown requested"
+  exit 0
+fi
+
+: > "${log_file}"
+
+if ! command -v gnome-shell >/dev/null 2>&1; then
+  log "gnome-shell executable not found"
+  exit 127
+fi
+
+if ! command -v dbus-run-session >/dev/null 2>&1; then
+  log "dbus-run-session executable not found"
+  exit 127
+fi
+
+width="${APOLLO_CLIENT_WIDTH:-${SUNSHINE_CLIENT_WIDTH:-1920}}"
+height="${APOLLO_CLIENT_HEIGHT:-${SUNSHINE_CLIENT_HEIGHT:-1080}}"
+fps="${APOLLO_CLIENT_FPS:-${SUNSHINE_CLIENT_FPS:-60}}"
+
+export MUTTER_DEBUG_DUMMY_MODE_SPECS="${width}x${height}@${fps}"
+export GNOME_SHELL_SESSION_MODE="${APOLLO_GNOME_SESSION_MODE:-ubuntu}"
+export XDG_CURRENT_DESKTOP="${APOLLO_GNOME_CURRENT_DESKTOP:-ubuntu:GNOME}"
+export XDG_SESSION_DESKTOP="${APOLLO_GNOME_SESSION_DESKTOP:-ubuntu}"
+export XDG_SESSION_TYPE=wayland
+export NO_AT_BRIDGE=1
+export APOLLO_GNOME_DEVKIT_FULLSCREEN="${APOLLO_GNOME_DEVKIT_FULLSCREEN:-1}"
+export APOLLO_GNOME_DEVKIT_WIDTH="${APOLLO_GNOME_DEVKIT_WIDTH:-${width}}"
+export APOLLO_GNOME_DEVKIT_HEIGHT="${APOLLO_GNOME_DEVKIT_HEIGHT:-${height}}"
+
+case "${APOLLO_GNOME_GAMECAST_MODE:-devkit}" in
+  devkit)
+    args=(--devkit --force-animations)
+    ;;
+  shell)
+    args=(--wayland --force-animations)
+    if [[ -n "${APOLLO_GNOME_SHELL_MODE:-}" ]]; then
+      args+=(--mode="${APOLLO_GNOME_SHELL_MODE}")
+    fi
+    ;;
+  *)
+    log "unsupported APOLLO_GNOME_GAMECAST_MODE: ${APOLLO_GNOME_GAMECAST_MODE}"
+    exit 64
+    ;;
+esac
+
+log "starting nested GNOME Shell ${APOLLO_GNOME_GAMECAST_MODE:-devkit} mode with session ${GNOME_SHELL_SESSION_MODE} at ${MUTTER_DEBUG_DUMMY_MODE_SPECS}"
+{
+  printf '[apollo-gnome-gamecast] env WAYLAND_DISPLAY=%s DISPLAY=%s GAMESCOPE_WAYLAND_DISPLAY=%s XDG_CURRENT_DESKTOP=%s XDG_SESSION_TYPE=%s\n' \
+    "${WAYLAND_DISPLAY:-}" \
+    "${DISPLAY:-}" \
+    "${GAMESCOPE_WAYLAND_DISPLAY:-}" \
+    "${XDG_CURRENT_DESKTOP:-}" \
+    "${XDG_SESSION_TYPE:-}"
+  printf '[apollo-gnome-gamecast] command: dbus-run-session -- gnome-shell'
+  printf ' %q' "${args[@]}"
+  printf '\n'
+
+  dbus-run-session -- gnome-shell "${args[@]}"
+  rc=$?
+  printf '[apollo-gnome-gamecast] gnome-shell exited with status %s\n' "${rc}"
+} >> "${log_file}" 2>&1
+
+if [[ "${rc:-1}" -ne 0 ]]; then
+  log "holding failed session for diagnostics"
+  sleep "${APOLLO_GNOME_FAILURE_HOLD:-30}"
+fi
+
+exit "${rc:-1}"

@@ -247,6 +247,11 @@ Gamescope session command:
 - Set it to a long-running command such as a lightweight window manager or diagnostic app when testing the Desktop entry, which otherwise has no app command of its own.
 - `APOLLO_GAMESCOPE_COMMAND` can override this temporarily for live diagnostics.
 
+Per-app backend routing:
+
+- Apps may set `"linux-virtual-display-backend": "gamescope"` in `apps.json` to use Gamescope for that app only.
+- Leave the normal `Desktop` entry unset so it inherits the global `auto` EVDI monitor/PipeWire path.
+
 Capture acceleration:
 
 - `linux_virtual_capture_backend = auto`: use the PipeWire path with the configured DMA-BUF policy.

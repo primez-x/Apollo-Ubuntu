@@ -87,6 +87,7 @@ namespace proc {
     std::string image_path;
     std::string id;
     std::string gamepad;
+    std::string linux_virtual_display_backend;
     bool elevated;
     bool auto_detach;
     bool wait_all;
@@ -96,6 +97,7 @@ namespace proc {
     bool per_client_app_identity;
     bool allow_client_commands;
     bool terminate_on_pause;
+    bool gamescope_cursor_overlay = true;
     int  scale_factor;
     std::chrono::seconds exit_timeout;
   };

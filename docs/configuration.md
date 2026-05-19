@@ -1052,6 +1052,10 @@ editing the `conf` file in a text editor. Use the examples as reference.
             GNOME while still giving the compositor a real virtual monitor. The
             `gamescope` backend starts an Apollo-owned headless Gamescope compositor
             and captures its PipeWire node.
+            Apps can override this per session with the
+            `linux-virtual-display-backend` key in `apps.json`; for example,
+            leave the normal Desktop app unset and set a separate GNOME Gamecast
+            app to `gamescope`.
             @note{Applies to Linux only. `APOLLO_LINUX_VIRTUAL_BACKEND` can override
             this value for diagnostics.}
         </td>

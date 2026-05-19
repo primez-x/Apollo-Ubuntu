@@ -386,6 +386,18 @@
                   v-model="editForm['virtual-display']"
                   default="false"
         ></Checkbox>
+        <div class="mb-3" v-if="platform === 'linux'">
+          <label for="linuxVirtualDisplayBackend" class="form-label">{{ $t('apps.linux_virtual_display_backend') }}</label>
+          <select class="form-select" id="linuxVirtualDisplayBackend"
+                  v-model="editForm['linux-virtual-display-backend']">
+            <option value="">{{ $t('apps.linux_virtual_display_backend_inherit') }}</option>
+            <option value="auto">EVDI monitor/PipeWire (auto)</option>
+            <option value="evdi">EVDI/KMS</option>
+            <option value="gamescope">Gamescope/PipeWire</option>
+            <option value="mutter">Mutter RecordVirtual/PipeWire</option>
+          </select>
+          <div class="form-text">{{ $t('apps.linux_virtual_display_backend_desc') }}</div>
+        </div>
         <!-- use app identity -->
         <Checkbox class="mb-3"
                   id="useAppIdentity"
@@ -547,6 +559,7 @@
     "per-client-app-identity": false,
     "allow-client-commands": true,
     "virtual-display": false,
+    "linux-virtual-display-backend": "",
     "terminate-on-pause": false,
     "gamepad": ""
   }

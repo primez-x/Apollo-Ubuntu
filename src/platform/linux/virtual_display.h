@@ -149,7 +149,8 @@ namespace VDISPLAY {
     uint32_t width,
     uint32_t height,
     uint32_t fps,
-    const uuid_util::uuid_t &guid
+    const uuid_util::uuid_t &guid,
+    std::optional<BACKEND> backend_override = std::nullopt
   );
 
   /**
@@ -264,6 +265,8 @@ namespace VDISPLAY {
   bool getGamescopeLaunchEnvironment(const std::string &displayName, gamescope_launch_environment_t &environment);
 
   bool getGamescopeCursorState(const std::string &displayName, gamescope_cursor_state_t &state);
+
+  bool setGamescopeCursorOverlay(const std::string &displayName, bool enabled);
 
   /**
    * @brief Send relative pointer motion to the active Mutter remote desktop virtual display.

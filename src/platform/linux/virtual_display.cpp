@@ -1393,7 +1393,8 @@ namespace VDISPLAY {
           "-h",
           height_arg,
           "-r",
-          refresh_arg
+          refresh_arg,
+          "--force-windows-fullscreen"
         };
         args.insert(args.end(), extra_args.begin(), extra_args.end());
         args.insert(args.end(), {"--", "/bin/sh", "-lc", command});
@@ -1644,6 +1645,7 @@ namespace VDISPLAY {
     int drm_fd;            // DRM fd for card
     bool active;
     bool using_evdi;       // true if the backend owns a real EVDI monitor
+    bool gamescope_cursor_overlay = true;
     std::shared_ptr<evdi_painter_t> painter;
     std::shared_ptr<gamescope_session_t> gamescope;
     gamescope_cursor_state_t gamescope_cursor;
@@ -2312,6 +2314,64 @@ namespace VDISPLAY {
     return false;
   }
 
+  static bool ensure_evdi_backend_available_locked(BACKEND backend) {
+    if (!evdi_available) {
+      evdi_available = load_evdi_library();
+
+      if (evdi_available && !check_evdi_module_loaded()) {
+        BOOST_LOG(warning) << "[VDISPLAY] EVDI library loaded but kernel module not available.";
+        evdi_available = false;
+      }
+    }
+
+    if (!evdi_available) {
+      BOOST_LOG(error) << "[VDISPLAY] " << linuxVirtualDisplayBackendName(backend)
+                       << " backend requires EVDI, but EVDI is not available.";
+      return false;
+    }
+
+    return true;
+  }
+
+  static bool ensure_backend_available_locked(BACKEND backend) {
+    switch (backend) {
+      case BACKEND::MUTTER_PIPEWIRE:
+        return mutter_screencast_available();
+
+      case BACKEND::GAMESCOPE_PIPEWIRE: {
+  #ifndef SUNSHINE_BUILD_PIPEWIRE
+        BOOST_LOG(error) << "[VDISPLAY] Gamescope backend requires PipeWire support.";
+        return false;
+  #else
+        auto binary = gamescope_binary();
+        if (!gamescope_binary_available(binary)) {
+          BOOST_LOG(error) << "[VDISPLAY] Gamescope backend requested, but Gamescope binary is not executable: " << binary;
+          return false;
+        }
+        return true;
+  #endif
+      }
+
+      case BACKEND::EVDI:
+        return ensure_evdi_backend_available_locked(backend);
+
+      case BACKEND::EVDI_PIPEWIRE:
+        if (!ensure_evdi_backend_available_locked(backend)) {
+          return false;
+        }
+        if (!mutter_screencast_available()) {
+          BOOST_LOG(error) << "[VDISPLAY] EVDI monitor/PipeWire backend requires Mutter ScreenCast.";
+          return false;
+        }
+        return true;
+
+      case BACKEND::UNKNOWN:
+      default:
+        BOOST_LOG(error) << "[VDISPLAY] Unknown Linux virtual display backend requested.";
+        return false;
+    }
+  }
+
   // ============================================================================
   // Utility Functions
   // ============================================================================
@@ -2916,56 +2976,7 @@ print(
     selected_backend = configured_backend();
     BOOST_LOG(info) << "[VDISPLAY] Requested Linux virtual display backend: " << linuxVirtualDisplayBackendName(selected_backend);
 
-    if (selected_backend == BACKEND::MUTTER_PIPEWIRE) {
-      evdi_available = false;
-      if (!mutter_screencast_available()) {
-        driver_status = DRIVER_STATUS::NOT_SUPPORTED;
-        return driver_status;
-      }
-
-      driver_status = DRIVER_STATUS::OK;
-      BOOST_LOG(info) << "[VDISPLAY] Linux virtual display driver initialized with Mutter/PipeWire.";
-      return driver_status;
-    }
-
-    if (selected_backend == BACKEND::GAMESCOPE_PIPEWIRE) {
-#ifndef SUNSHINE_BUILD_PIPEWIRE
-      BOOST_LOG(error) << "[VDISPLAY] Gamescope backend requires PipeWire support.";
-      driver_status = DRIVER_STATUS::NOT_SUPPORTED;
-      return driver_status;
-#endif
-      evdi_available = false;
-      auto binary = gamescope_binary();
-      if (!gamescope_binary_available(binary)) {
-        BOOST_LOG(error) << "[VDISPLAY] Gamescope backend requested, but Gamescope binary is not executable: " << binary;
-        driver_status = DRIVER_STATUS::NOT_SUPPORTED;
-        return driver_status;
-      }
-
-      driver_status = DRIVER_STATUS::OK;
-      BOOST_LOG(info) << "[VDISPLAY] Linux virtual display driver initialized with Gamescope/PipeWire.";
-      return driver_status;
-    }
-
-    evdi_available = load_evdi_library();
-
-    if (evdi_available) {
-      // Check if kernel module is loaded
-      if (!check_evdi_module_loaded()) {
-        BOOST_LOG(warning) << "[VDISPLAY] EVDI library loaded but kernel module not available.";
-        evdi_available = false;
-      }
-    }
-
-    if (!evdi_available) {
-      BOOST_LOG(error) << "[VDISPLAY] " << linuxVirtualDisplayBackendName(selected_backend)
-                       << " backend requires EVDI, but EVDI is not available.";
-      driver_status = DRIVER_STATUS::NOT_SUPPORTED;
-      return driver_status;
-    }
-
-    if (selected_backend == BACKEND::EVDI_PIPEWIRE && !mutter_screencast_available()) {
-      BOOST_LOG(error) << "[VDISPLAY] EVDI monitor/PipeWire backend requires Mutter ScreenCast.";
+    if (!ensure_backend_available_locked(selected_backend)) {
       driver_status = DRIVER_STATUS::NOT_SUPPORTED;
       return driver_status;
     }
@@ -3081,12 +3092,20 @@ print(
     uint32_t width,
     uint32_t height,
     uint32_t fps,
-    const uuid_util::uuid_t &guid
+    const uuid_util::uuid_t &guid,
+    std::optional<BACKEND> backend_override
   ) {
     std::lock_guard<std::mutex> lock(vdisplay_mutex);
 
     if (driver_status != DRIVER_STATUS::OK) {
       BOOST_LOG(error) << "[VDISPLAY] Driver not initialized.";
+      return "";
+    }
+
+    const auto requested_backend = backend_override.value_or(selected_backend);
+    if (!ensure_backend_available_locked(requested_backend)) {
+      BOOST_LOG(error) << "[VDISPLAY] " << linuxVirtualDisplayBackendName(requested_backend)
+                       << " virtual display backend is not available for this session.";
       return "";
     }
 
@@ -3110,7 +3129,7 @@ print(
     vdinfo.width = width;
     vdinfo.height = height;
     vdinfo.fps = fps_hz * 1000;
-    vdinfo.backend = selected_backend;
+    vdinfo.backend = requested_backend;
     vdinfo.device_index = -1;
     vdinfo.handle = nullptr;
     vdinfo.drm_fd = -1;
@@ -3121,7 +3140,7 @@ print(
     vdinfo.gamescope_cursor.width = width;
     vdinfo.gamescope_cursor.height = height;
 
-    if (selected_backend == BACKEND::MUTTER_PIPEWIRE) {
+    if (requested_backend == BACKEND::MUTTER_PIPEWIRE) {
 #ifdef SUNSHINE_BUILD_PIPEWIRE
       if (!create_mutter_virtual_stream(vdinfo)) {
         BOOST_LOG(error) << "[VDISPLAY] Mutter/PipeWire virtual display creation failed for " << display_name;
@@ -3131,13 +3150,13 @@ print(
       BOOST_LOG(error) << "[VDISPLAY] Mutter/PipeWire backend is not compiled in.";
       return "";
 #endif
-    } else if (selected_backend == BACKEND::GAMESCOPE_PIPEWIRE) {
+    } else if (requested_backend == BACKEND::GAMESCOPE_PIPEWIRE) {
       vdinfo.gamescope = std::make_shared<gamescope_session_t>();
       if (!vdinfo.gamescope->start(display_name, width, height, fps_hz)) {
         BOOST_LOG(error) << "[VDISPLAY] Gamescope/PipeWire virtual display creation failed for " << display_name;
         return "";
       }
-    } else if ((selected_backend == BACKEND::EVDI || selected_backend == BACKEND::EVDI_PIPEWIRE) && evdi_available) {
+    } else if ((requested_backend == BACKEND::EVDI || requested_backend == BACKEND::EVDI_PIPEWIRE) && evdi_available) {
       // Create real virtual display using EVDI
       int device = find_available_evdi_device();
       if (device >= 0) {
@@ -3156,7 +3175,7 @@ print(
           vdinfo.device_index = device;
           vdinfo.handle = handle;
           vdinfo.using_evdi = true;
-          vdinfo.backend = selected_backend;
+          vdinfo.backend = requested_backend;
           if (should_run_evdi_painter(vdinfo.backend)) {
             vdinfo.painter = std::make_shared<evdi_painter_t>();
             vdinfo.painter->start(
@@ -3183,8 +3202,8 @@ print(
       }
     }
 
-    if ((selected_backend == BACKEND::EVDI || selected_backend == BACKEND::EVDI_PIPEWIRE) && !vdinfo.using_evdi) {
-      BOOST_LOG(error) << "[VDISPLAY] " << linuxVirtualDisplayBackendName(selected_backend)
+    if ((requested_backend == BACKEND::EVDI || requested_backend == BACKEND::EVDI_PIPEWIRE) && !vdinfo.using_evdi) {
+      BOOST_LOG(error) << "[VDISPLAY] " << linuxVirtualDisplayBackendName(requested_backend)
                        << " virtual display creation failed; refusing fallback to a physical display.";
       return "";
     }
@@ -3480,7 +3499,24 @@ print(
     std::lock_guard<std::mutex> lock(vdisplay_mutex);
     for (const auto &[guid, vdinfo] : virtual_displays) {
       if (vdinfo.active && vdinfo.name == displayName && vdinfo.backend == BACKEND::GAMESCOPE_PIPEWIRE) {
+        if (!vdinfo.gamescope_cursor_overlay) {
+          return false;
+        }
         state = vdinfo.gamescope_cursor;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool setGamescopeCursorOverlay(const std::string &displayName, bool enabled) {
+    std::lock_guard<std::mutex> lock(vdisplay_mutex);
+    for (auto &[guid, vdinfo] : virtual_displays) {
+      if (vdinfo.active && vdinfo.name == displayName && vdinfo.backend == BACKEND::GAMESCOPE_PIPEWIRE) {
+        vdinfo.gamescope_cursor_overlay = enabled;
+        if (!enabled) {
+          vdinfo.gamescope_cursor.visible = false;
+        }
         return true;
       }
     }

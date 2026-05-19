@@ -9,6 +9,7 @@
 #endif
 // standard includes
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -310,13 +311,27 @@ namespace proc {
           launch_session->display_guid
         );
 #else
+        std::optional<VDISPLAY::BACKEND> linux_backend_override;
+        if (!_app.linux_virtual_display_backend.empty()) {
+          linux_backend_override = VDISPLAY::parseLinuxVirtualDisplayBackend(_app.linux_virtual_display_backend);
+          if (linux_backend_override) {
+            BOOST_LOG(info) << "App [" << _app.name << "] requested Linux virtual display backend: "
+                            << VDISPLAY::linuxVirtualDisplayBackendName(*linux_backend_override) << '.';
+          } else {
+            BOOST_LOG(warning) << "App [" << _app.name << "] has unknown linux-virtual-display-backend="
+                               << _app.linux_virtual_display_backend
+                               << "; using the configured Linux virtual display backend.";
+          }
+        }
+
         std::string vdisplayName = VDISPLAY::createVirtualDisplay(
           device_uuid_str.c_str(),
           device_name.c_str(),
           render_width,
           render_height,
           target_fps,
-          launch_session->display_guid
+          launch_session->display_guid,
+          linux_backend_override
         );
 #endif
 
@@ -360,6 +375,11 @@ namespace proc {
               BOOST_LOG(info) << "Using Mutter/PipeWire virtual display [" << this->display_name << "] for direct GNOME capture.";
             } else if (backend == VDISPLAY::BACKEND::GAMESCOPE_PIPEWIRE) {
               BOOST_LOG(info) << "Using Gamescope/PipeWire virtual display [" << this->display_name << "] for Apollo-owned remote session capture.";
+              if (VDISPLAY::setGamescopeCursorOverlay(this->display_name, _app.gamescope_cursor_overlay)) {
+                BOOST_LOG(info) << "Gamescope software cursor overlay is "
+                                << (_app.gamescope_cursor_overlay ? "enabled" : "disabled")
+                                << " for app [" << _app.name << "].";
+              }
               VDISPLAY::gamescope_launch_environment_t gamescope_env;
               if (VDISPLAY::getGamescopeLaunchEnvironment(this->display_name, gamescope_env)) {
                 _env["WAYLAND_DISPLAY"] = gamescope_env.wayland_display;
@@ -1414,6 +1434,13 @@ namespace proc {
           }
           if (app_node.contains("image-path"))
             ctx.image_path = parse_env_val(this_env, app_node.value("image-path", ""));
+          if (app_node.contains("linux-virtual-display-backend")) {
+            ctx.linux_virtual_display_backend = parse_env_val(this_env, app_node.value("linux-virtual-display-backend", ""));
+          } else if (app_node.contains("linux_virtual_display_backend")) {
+            ctx.linux_virtual_display_backend = parse_env_val(this_env, app_node.value("linux_virtual_display_backend", ""));
+          } else if (app_node.contains("virtual-display-backend")) {
+            ctx.linux_virtual_display_backend = parse_env_val(this_env, app_node.value("virtual-display-backend", ""));
+          }
 
           ctx.elevated = app_node.value("elevated", false);
           ctx.auto_detach = app_node.value("auto-detach", true);
@@ -1426,6 +1453,7 @@ namespace proc {
           ctx.allow_client_commands = app_node.value("allow-client-commands", true);
           ctx.terminate_on_pause = app_node.value("terminate-on-pause", false);
           ctx.gamepad = app_node.value("gamepad", "");
+          ctx.gamescope_cursor_overlay = app_node.value("gamescope-cursor-overlay", true);
 
           // Calculate a unique application id.
           auto possible_ids = calculate_app_id(name, ctx.image_path, i++);
