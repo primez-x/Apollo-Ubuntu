@@ -847,6 +847,17 @@ namespace proc {
         VDISPLAY::changeDisplaySettings2(this->display_name.c_str(), _launch_session->width, _launch_session->height, _launch_session->fps, false);
       }
 
+      if (this->virtual_display && !this->display_name.empty()) {
+        // For the Mutter/PipeWire backend, re-promote a physical primary WHILE the virtual head
+        // still exists, so destroying it below cannot leave GNOME with a vanished primary (local
+        // headless lockout). No-op for other backends.
+        const bool restored = VDISPLAY::restoreMutterPhysicalPrimary(this->display_name);
+        if (!restored && VDISPLAY::virtualDisplayBackend(this->display_name) == VDISPLAY::BACKEND::MUTTER_PIPEWIRE) {
+          BOOST_LOG(error) << "Could not restore a physical primary before destroying the Mutter virtual display ["
+                           << this->display_name << "]; if the local screen goes blank, reconnect a monitor or SSH in to recover.";
+        }
+      }
+
       if (VDISPLAY::removeVirtualDisplay(_launch_session->display_guid)) {
         BOOST_LOG(info) << "Virtual Display removed successfully";
       } else if (this->virtual_display) {

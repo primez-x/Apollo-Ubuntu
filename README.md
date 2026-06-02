@@ -5,11 +5,13 @@ It keeps Apollo's Moonlight/Artemis streaming workflow while maintaining the Lin
 
 ## What This Fork Provides
 
-- GNOME Wayland virtual display streaming for Ubuntu.
-- EVDI-backed real virtual monitors so streamed sessions do not mirror the physical display.
-- Mutter ScreenCast/PipeWire capture for smooth frame pacing on GNOME.
-- AMD, Intel, and Nvidia encoding through the Linux encoder stack available on the host.
-- User service packaging, udev rules, EVDI module loading, and Ubuntu install documentation.
+- **Kernel-free virtual display streaming on GNOME Wayland.** A real virtual monitor is created entirely through GNOME Mutter's RecordVirtual D-Bus API — no out-of-tree kernel module to build or load.
+- **Secure Boot safe.** There is no DKMS module to sign and no MOK (`Machine Owner Key`) enrollment, so UEFI Secure Boot can stay enabled.
+- **Real, isolated desktop.** Streamed sessions render onto a dedicated virtual head instead of mirroring the physical display; the real desktop and its windows relocate onto it, and the physical monitor is powered down while streaming.
+- **High resolution and frame rate.** Native and 4K resolutions with 120 fps+ capture, paced by the compositor.
+- **AMD, Intel, and NVIDIA encoding** through the Linux encoder stack available on the host.
+- **Optional Gamescope backend** for launching games into an Apollo-owned headless compositor.
+- User service packaging, udev rules, PipeWire integration, and Ubuntu install documentation.
 - A cautious upstream-tracking workflow for reviewing ClassicOldSong/Apollo changes before merging them into this Linux fork.
 
 ## Supported Host
@@ -18,10 +20,10 @@ This branch targets Ubuntu desktop hosts, especially:
 
 - Ubuntu 24.04 LTS or newer.
 - Ubuntu 26.04 development/current testing builds.
-- GNOME on Wayland with the streaming user already logged in.
+- GNOME on Wayland (Mutter ScreenCast/RemoteDesktop API version 4+) with the streaming user already logged in.
 - A Moonlight-compatible client such as Artemis or Moonlight.
 
-Other Linux distributions may still build, but Ubuntu is the supported release target for this fork.
+UEFI Secure Boot can remain enabled — the virtual display path does not load any kernel module. Other Linux distributions with GNOME Wayland may still build and run, but Ubuntu is the supported release target for this fork.
 
 ## Recommended Install
 
@@ -98,15 +100,14 @@ before GDM can start the automatic login.
 
 ## Ubuntu Runtime Requirements
 
-The Debian package is intended to install the required runtime dependencies, including EVDI, PipeWire, GIO/GLib, DRM, VAAPI, and input rules. If you are preparing a host manually, install:
+The Debian package is intended to install the required runtime dependencies, including PipeWire, GIO/GLib, DRM, VAAPI, and input rules. If you are preparing a host manually, install:
 
 ```bash
 sudo apt update
-sudo apt install evdi-dkms libevdi1 pipewire wireplumber
-sudo modprobe evdi
+sudo apt install pipewire wireplumber
 ```
 
-For the experimental Gamescope backend, also install:
+For the optional Gamescope backend, also install:
 
 ```bash
 sudo apt install gamescope libei1
@@ -115,58 +116,20 @@ sudo apt install gamescope libei1
 Verify the virtual display prerequisites:
 
 ```bash
-lsmod | grep evdi
 systemctl --user status pipewire wireplumber
 ```
 
-If `evdi` is not loaded after a kernel update, reboot or run:
+The virtual display is created over D-Bus through GNOME Mutter, so there is no kernel module to load and nothing to rebuild after a kernel update.
+
+### Secure Boot
+
+No action required. The virtual display path is kernel-free, so there is no DKMS
+module to sign and no MOK (`Machine Owner Key`) enrollment step. You can leave
+UEFI Secure Boot enabled.
 
 ```bash
-sudo dkms autoinstall
-sudo modprobe evdi
+mokutil --sb-state   # Secure Boot may remain enabled
 ```
-
-### Secure Boot And MOK Enrollment
-
-On systems with UEFI Secure Boot enabled, Ubuntu will only load DKMS-built
-kernel modules after the module-signing key has been enrolled through MOK
-(`Machine Owner Key`). This is a host firmware/Secure Boot trust step, not an
-Apollo setting.
-
-Check Secure Boot state:
-
-```bash
-mokutil --sb-state
-```
-
-If Secure Boot is enabled, `apt install ./ApolloUbuntu*.deb` may prompt you to
-create a one-time MOK enrollment password while `evdi-dkms` is being installed.
-After the package install completes, reboot and use the blue MOK Manager screen
-to enroll the key:
-
-```text
-Enroll MOK -> Continue -> Yes -> enter the one-time password -> Reboot
-```
-
-If the prompt was skipped, or if EVDI later fails to load after a kernel update,
-re-run the enrollment flow and rebuild the DKMS module:
-
-```bash
-sudo update-secureboot-policy --enroll-key
-sudo dkms autoinstall
-sudo reboot
-```
-
-After reboot:
-
-```bash
-sudo modprobe evdi
-lsmod | grep evdi
-```
-
-If `modprobe evdi` reports `Required key not available` or `Key was rejected by
-service`, Secure Boot is blocking the EVDI module and MOK enrollment is still
-required.
 
 ## Build From Source On Ubuntu
 
@@ -208,12 +171,7 @@ cpack -G DEB --config build/CPackConfig.cmake
 
 Flatpak packaging is kept in-tree for experimentation and future distribution, but the Ubuntu `.deb` is the recommended install path for the virtual display backend.
 
-EVDI is a host kernel module, so Flatpak cannot fully self-contain virtual display setup. Before running the Flatpak build, install EVDI on the host:
-
-```bash
-sudo apt install evdi-dkms libevdi1
-sudo modprobe evdi
-```
+The virtual display path talks to the host's GNOME session bus (Mutter ScreenCast/RemoteDesktop and PipeWire), so the Flatpak still needs an active GNOME Wayland session for the streaming user, but it no longer depends on any host kernel module.
 
 After installing the Flatpak artifact:
 
@@ -233,13 +191,12 @@ linux_pipewire_dmabuf = off
 linux_gamescope_session_command =
 ```
 
-`auto` uses the EVDI monitor plus Mutter ScreenCast/PipeWire backend. That is the supported GNOME Wayland path.
+`auto` uses the kernel-free GNOME Mutter RecordVirtual/PipeWire path. That is the supported GNOME Wayland backend: Apollo asks Mutter to create a virtual monitor, relocates the real desktop onto it, captures it over PipeWire, and injects input through Mutter RemoteDesktop.
 
-Diagnostic alternatives:
+Alternatives:
 
+- `mutter`: explicitly select the Mutter RecordVirtual/PipeWire path (same as `auto`).
 - `gamescope`: start an Apollo-owned headless Gamescope compositor and capture its PipeWire node. App commands are launched into the Gamescope Wayland/Xwayland session.
-- `mutter`: GNOME Mutter RecordVirtual/PipeWire without EVDI.
-- `evdi`: direct EVDI/KMS capture.
 
 Gamescope session command:
 
@@ -250,7 +207,7 @@ Gamescope session command:
 Per-app backend routing:
 
 - Apps may set `"linux-virtual-display-backend": "gamescope"` in `apps.json` to use Gamescope for that app only.
-- Leave the normal `Desktop` entry unset so it inherits the global `auto` EVDI monitor/PipeWire path.
+- Leave the normal `Desktop` entry unset so it inherits the global `auto` (Mutter RecordVirtual) path.
 
 Capture acceleration:
 
@@ -266,7 +223,7 @@ When DMA-BUF diagnostics are enabled in logs, `data_type=3` means PipeWire deliv
 For temporary diagnostics only, the environment variable below overrides the config value:
 
 ```bash
-systemctl --user set-environment APOLLO_LINUX_VIRTUAL_BACKEND=evdi
+systemctl --user set-environment APOLLO_LINUX_VIRTUAL_BACKEND=gamescope
 systemctl --user restart sunshine.service
 
 systemctl --user set-environment APOLLO_LINUX_VIRTUAL_CAPTURE=pipewire APOLLO_PIPEWIRE_DMABUF=force
@@ -293,7 +250,6 @@ journalctl --user -u sunshine.service -f
 Virtual display checks:
 
 ```bash
-lsmod | grep evdi
 ls /dev/dri
 systemctl --user status pipewire wireplumber
 ```
@@ -313,7 +269,7 @@ session exists.
 
 ## Fork Maintenance
 
-ClassicOldSong/Apollo remains the parent project for Apollo behavior, but this repository is the Ubuntu/Linux release line. Parent changes should be imported deliberately, tested against GNOME Wayland, EVDI, PipeWire, and Moonlight streaming, and then merged into this fork only after Linux compatibility is reviewed.
+ClassicOldSong/Apollo remains the parent project for Apollo behavior, but this repository is the Ubuntu/Linux release line. Parent changes should be imported deliberately, tested against GNOME Wayland, Mutter ScreenCast/RemoteDesktop, PipeWire, and Moonlight streaming, and then merged into this fork only after Linux compatibility is reviewed.
 
 See [docs/fork-maintenance.md](docs/fork-maintenance.md) for the upstream tracking workflow.
 
@@ -323,8 +279,7 @@ This fork builds on:
 
 - [ClassicOldSong/Apollo](https://github.com/ClassicOldSong/Apollo)
 - [LizardByte/Sunshine](https://github.com/LizardByte/Sunshine)
-- [DisplayLink EVDI](https://github.com/DisplayLink/evdi)
-- GNOME Mutter ScreenCast and PipeWire
+- GNOME Mutter ScreenCast, RemoteDesktop, and PipeWire
 
 ## Support
 

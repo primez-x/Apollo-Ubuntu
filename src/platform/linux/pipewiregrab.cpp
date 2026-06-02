@@ -248,6 +248,7 @@ namespace platf {
 	        height = config.height;
         const auto virtual_backend = VDISPLAY::virtualDisplayBackend(display_name);
         gamescope_pipewire_capture = virtual_backend == VDISPLAY::BACKEND::GAMESCOPE_PIPEWIRE;
+        is_mutter_pipewire = virtual_backend == VDISPLAY::BACKEND::MUTTER_PIPEWIRE;
 	        configure_dmabuf_policy();
 	        std::uint32_t requested_framerate_override {};
         std::uint32_t virtual_width {};
@@ -626,6 +627,21 @@ namespace platf {
 	                        << " spa_format=" << static_cast<int>(self->pipewire_format)
 	                        << " modifier=" << self->pipewire_modifier
 	                        << " capture_path=" << pipewire_capture_mode_name(self->active_capture_mode);
+
+	        // RecordVirtual desktop layout: once a format is negotiated the Mutter virtual head
+	        // (Meta-0) has materialized, so make it the sole primary to relocate the real desktop
+	        // onto it. One-shot (atomic), off-thread (helper runs a subprocess up to ~8s).
+	        if (self->is_mutter_pipewire) {
+	          bool expected = false;
+	          if (self->mutter_layout_applied.compare_exchange_strong(expected, true)) {
+	            BOOST_LOG(info) << "GNOME PipeWire format ready for " << self->display_name
+	                            << "; applying RecordVirtual desktop layout (isolate).";
+	            std::string layout_name = self->display_name;
+	            std::thread([layout_name]() {
+	              VDISPLAY::applyMutterDisplayLayout(layout_name, true);
+	            }).detach();
+	          }
+	        }
 	      }
 
 	      static void on_stream_process(void *data) {
@@ -1472,6 +1488,8 @@ namespace platf {
       bool gamescope_drives_pipewire {};
       bool logged_trigger_failure {};
       bool gamescope_pipewire_capture {};
+      bool is_mutter_pipewire {};
+      std::atomic<bool> mutter_layout_applied {false};
       bool logged_software_cursor_overlay {};
 		      std::chrono::steady_clock::time_point process_diag_at {};
 	      std::uint64_t process_frames {};

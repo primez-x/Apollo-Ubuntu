@@ -4,6 +4,7 @@
  */
 // lib includes
 #include <inputtino/input.hpp>
+#include <inputtino/keyboard.hpp>
 #include <libevdev/libevdev.h>
 
 // local includes
@@ -103,6 +104,16 @@ namespace platf {
   void keyboard_update(input_t &input, uint16_t modcode, bool release, uint8_t flags) {
     if (VDISPLAY::notifyGamescopeKeyboardKey(modcode, release)) {
       return;
+    }
+
+    // Mutter RecordVirtual path: translate the Moonlight/VK code to an evdev keycode and
+    // inject via the RemoteDesktop session. notifyMutterKeyboardKeycode returns false unless
+    // the active backend is MUTTER_PIPEWIRE, so EVDI/uinput still works via the fallback below.
+    auto mapping = inputtino::keyboard::key_mappings.find((short) modcode);
+    if (mapping != inputtino::keyboard::key_mappings.end() && mapping->second.linux_code != inputtino::keyboard::UNKNOWN) {
+      if (VDISPLAY::notifyMutterKeyboardKeycode((uint32_t) mapping->second.linux_code, release)) {
+        return;
+      }
     }
 
     auto raw = (input_raw_t *) input.get();

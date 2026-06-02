@@ -1645,6 +1645,7 @@ namespace VDISPLAY {
     int drm_fd;            // DRM fd for card
     bool active;
     bool using_evdi;       // true if the backend owns a real EVDI monitor
+    std::string saved_primary_connector;  // physical primary to restore on Mutter/PipeWire teardown
     bool gamescope_cursor_overlay = true;
     std::shared_ptr<evdi_painter_t> painter;
     std::shared_ptr<gamescope_session_t> gamescope;
@@ -2045,6 +2046,112 @@ namespace VDISPLAY {
     return true;
   }
 
+  // DRM/Mutter connector names use a restricted charset (e.g. DP-6, HDMI-A-1, Meta-0).
+  // Reject anything else so a connector name can never be interpreted as shell syntax.
+  static bool is_safe_connector_name(const std::string &name) {
+    if (name.empty() || name.size() > 64) {
+      return false;
+    }
+    for (unsigned char c : name) {
+      const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                      (c >= '0' && c <= '9') || c == '.' || c == '_' || c == ':' || c == '-';
+      if (!ok) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // Prefer the private per-user runtime dir (mode 0700) over world-writable /tmp for helper
+  // scripts and their output, to avoid TOCTOU/symlink tampering of files we then execute/read.
+  static std::string apollo_helper_dir() {
+    const char *xdg = std::getenv("XDG_RUNTIME_DIR");
+    if (xdg && xdg[0] == '/') {
+      return std::string(xdg);
+    }
+    return std::string("/tmp");
+  }
+
+  static std::string detect_mutter_primary_connector() {
+    const std::string script_path = apollo_helper_dir() + "/apollo-mutter-primary.py";
+    const std::string out_path = apollo_helper_dir() + "/apollo-mutter-primary.out";
+    std::ofstream script(script_path, std::ios::trunc);
+    if (!script) {
+      return std::string();
+    }
+    script << R"PY(#!/usr/bin/env python3
+import time
+
+from gi.repository import Gio
+
+bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+
+
+def is_virtual(connector, vendor, product):
+    hay = (connector + " " + vendor + " " + product).upper()
+    return (
+        connector.startswith("Meta-")
+        or "METAVENDOR" in hay
+        or "APOLLO" in hay
+        or "VDISP" in hay
+        or "VIRTUAL REMOTE MONITOR" in hay
+    )
+
+
+for _attempt in range(8):
+    try:
+        state = bus.call_sync(
+            "org.gnome.Mutter.DisplayConfig",
+            "/org/gnome/Mutter/DisplayConfig",
+            "org.gnome.Mutter.DisplayConfig",
+            "GetCurrentState",
+            None,
+            None,
+            Gio.DBusCallFlags.NONE,
+            3000,
+            None,
+        ).unpack()
+    except Exception:
+        time.sleep(0.25)
+        continue
+
+    chosen = None
+    for logical in state[2]:
+        if not (logical[4] and logical[5]):
+            continue
+        connector, vendor, product, _serial = logical[5][0]
+        if is_virtual(connector, vendor, product):
+            continue
+        chosen = connector
+        break
+
+    if chosen:
+        print(chosen)
+        break
+
+    time.sleep(0.25)
+)PY";
+    script.close();
+
+    std::string command = std::string("timeout 4s python3 ") + script_path + " > " + out_path + " 2>/dev/null";
+    int rc = std::system(command.c_str());
+    (void) rc;
+
+    std::ifstream in(out_path);
+    std::string connector;
+    std::getline(in, connector);
+    while (!connector.empty() && (connector.back() == '\n' || connector.back() == '\r' || connector.back() == ' ' || connector.back() == '\t')) {
+      connector.pop_back();
+    }
+    if (!is_safe_connector_name(connector)) {
+      if (!connector.empty()) {
+        BOOST_LOG(warning) << "[VDISPLAY] Ignoring unexpected primary connector name from Mutter.";
+      }
+      return std::string();
+    }
+    return connector;
+  }
+
   static bool create_mutter_virtual_stream(VirtualDisplayInfo &vdinfo) {
     GError *raw_error = nullptr;
     vdinfo.mutter_bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &raw_error);
@@ -2053,6 +2160,17 @@ namespace VDISPLAY {
       BOOST_LOG(error) << "[VDISPLAY] Unable to connect to the session bus for " << vdinfo.name
                        << ": " << (dbus_error ? dbus_error->message : "unknown");
       return false;
+    }
+
+    // Capture the current physical primary BEFORE the virtual head exists, so teardown
+    // can re-promote it and avoid leaving GNOME with a destroyed primary (headless lockout).
+    vdinfo.saved_primary_connector = detect_mutter_primary_connector();
+    if (!vdinfo.saved_primary_connector.empty()) {
+      BOOST_LOG(info) << "[VDISPLAY] Saved pre-session primary connector '" << vdinfo.saved_primary_connector
+                      << "' for " << vdinfo.name << " (restored on teardown).";
+    } else {
+      BOOST_LOG(warning) << "[VDISPLAY] Could not detect a physical primary connector for " << vdinfo.name
+                         << "; teardown will rely on Mutter's fallback.";
     }
 
     if (!create_mutter_remote_desktop_session(vdinfo)) {
@@ -2472,8 +2590,18 @@ namespace VDISPLAY {
     BOOST_LOG(debug) << "[VDISPLAY] DRM connector probe found no modes for " << context;
   }
 
-  static bool apply_mutter_display_config(uint32_t width, uint32_t height, uint32_t refresh_hz, bool isolate) {
-    constexpr const char *script_path = "/tmp/apollo-mutter-displayconfig.py";
+  // physical_power: "off" -> blank physical outputs (PowerSaveMode=3) after applying the layout;
+  // "on" -> wake them (PowerSaveMode=0); "none" -> leave power state untouched. Only the
+  // RecordVirtual path uses "off"/"on": on NVIDIA, dropping the physical monitor from the layout
+  // is not enough to power down its connector (it keeps scanning out a frozen frame), so the
+  // RecordVirtual isolate explicitly DPMS-offs it, and teardown wakes it back. The EVDI path
+  // (and any other caller) must leave this at the "none" default.
+  static bool apply_mutter_display_config(uint32_t width, uint32_t height, uint32_t refresh_hz, bool isolate, const std::string &primary_override = std::string(), bool restore_mode = false, const std::string &physical_power = std::string("none")) {
+    if (!primary_override.empty() && !is_safe_connector_name(primary_override)) {
+      BOOST_LOG(warning) << "[VDISPLAY] Refusing unsafe primary connector override.";
+      return false;
+    }
+    const std::string script_path = apollo_helper_dir() + "/apollo-mutter-displayconfig.py";
 
     std::ofstream script(script_path, std::ios::trunc);
     if (!script) {
@@ -2491,6 +2619,9 @@ target_width = int(sys.argv[1])
 target_height = int(sys.argv[2])
 target_refresh = int(sys.argv[3])
 isolate = sys.argv[4] == "1"
+primary_override = sys.argv[5] if len(sys.argv) > 5 else ""
+restore_mode = (sys.argv[6] == "1") if len(sys.argv) > 6 else False
+power_action = sys.argv[7] if len(sys.argv) > 7 else "none"
 
 
 def monitor_key(spec):
@@ -2506,6 +2637,9 @@ def is_apollo_monitor(monitor):
         vendor.upper() == "APL"
         or "APOLLO" in haystack
         or "VDISP" in haystack
+        or vendor.upper() == "METAVENDOR"
+        or connector.startswith("Meta-")
+        or "VIRTUAL REMOTE MONITOR" in haystack
     )
 
 
@@ -2602,43 +2736,61 @@ def bus_names_for_gnome_shell():
     return list(dict.fromkeys(names))
 
 
+def find_target(candidate_state):
+    # restore mode: promote a real physical connector, never a virtual head
+    if restore_mode:
+        if primary_override:
+            for monitor in candidate_state[1]:
+                if monitor[0][0] == primary_override and not is_apollo_monitor(monitor):
+                    return monitor
+        for monitor in candidate_state[1]:
+            if not is_apollo_monitor(monitor):
+                return monitor
+        return None
+    # normal mode: promote the Apollo/Meta virtual head
+    for monitor in candidate_state[1]:
+        if is_apollo_monitor(monitor):
+            return monitor
+    return None
+
+
 state = None
-apollo_monitor = None
+target_monitor = None
 proxy_name = None
 candidate_names = bus_names_for_gnome_shell()
-for _attempt in range(12):
+for _attempt in range(40):
     for candidate_name in candidate_names:
         try:
             candidate_state = get_state_for_name(candidate_name)
         except Exception:
             continue
 
-        for monitor in candidate_state[1]:
-            if is_apollo_monitor(monitor):
-                proxy_name = candidate_name
-                state = candidate_state
-                apollo_monitor = monitor
-                break
-
-        if apollo_monitor:
+        found = find_target(candidate_state)
+        if found:
+            proxy_name = candidate_name
+            state = candidate_state
+            target_monitor = found
             break
 
-    if apollo_monitor:
+    if target_monitor:
         break
 
     time.sleep(0.1)
 
-if not apollo_monitor:
-    print("[VDISPLAY] Apollo EVDI monitor was not visible to Mutter", file=sys.stderr)
+if not target_monitor:
+    print("[VDISPLAY] target monitor not visible to Mutter (override=%r)" % primary_override, file=sys.stderr)
     sys.exit(2)
 
 serial, monitors, logical_monitors, properties = state
 monitor_by_spec = {monitor_key(monitor[0]): monitor for monitor in monitors}
-apollo_spec = apollo_monitor[0]
-apollo_mode = pick_mode(apollo_monitor, target_width, target_height, target_refresh)
+primary_spec = target_monitor[0]
+if restore_mode:
+    primary_mode = pick_mode(target_monitor)
+else:
+    primary_mode = pick_mode(target_monitor, target_width, target_height, target_refresh)
 
-if not apollo_mode:
-    print("[VDISPLAY] Apollo EVDI monitor has no modes", file=sys.stderr)
+if not primary_mode:
+    print("[VDISPLAY] target monitor has no modes", file=sys.stderr)
     sys.exit(3)
 
 layout_mode = int(properties.get("layout-mode", 1))
@@ -2646,16 +2798,16 @@ logical_config = [
     (
         0,
         0,
-        float(apollo_mode[4]),
+        float(primary_mode[4]),
         0,
         True,
-        [(apollo_spec[0], apollo_mode[0], {})],
+        [(primary_spec[0], primary_mode[0], {})],
     )
 ]
 
-next_x = int(apollo_mode[1])
-if not isolate:
-    added = {monitor_key(apollo_spec)}
+next_x = int(primary_mode[1])
+if restore_mode or not isolate:
+    added = {monitor_key(primary_spec)}
     for logical in logical_monitors:
         scale = float(logical[2])
         transform = int(logical[3])
@@ -2666,6 +2818,10 @@ if not isolate:
 
             monitor = monitor_by_spec.get(key)
             if not monitor:
+                continue
+
+            # in restore mode never re-add the virtual head (it is being destroyed)
+            if restore_mode and is_apollo_monitor(monitor):
                 continue
 
             mode = pick_mode(monitor)
@@ -2708,10 +2864,38 @@ bus.call_sync(
 )
 
 print(
-    f"[VDISPLAY] Applied Mutter monitor layout: Apollo primary "
-    f"{apollo_mode[1]}x{apollo_mode[2]}@{float(apollo_mode[3]):.3f}Hz, "
-    f"isolate={isolate}, bus={proxy_name}"
+    f"[VDISPLAY] Applied Mutter monitor layout: primary {primary_spec[0]} "
+    f"{primary_mode[1]}x{primary_mode[2]}@{float(primary_mode[3]):.3f}Hz, "
+    f"isolate={isolate}, override={primary_override!r}, bus={proxy_name}"
 )
+
+# On NVIDIA, a monitor dropped from the layout is not actually powered down -- the connector
+# keeps scanning out its last frame. Use Mutter's PowerSaveMode (DPMS) to truly blank the
+# physical output while the RecordVirtual head is primary, and wake it again on restore.
+if power_action in ("off", "on"):
+    power_mode = 3 if power_action == "off" else 0
+    try:
+        bus.call_sync(
+            proxy_name,
+            "/org/gnome/Mutter/DisplayConfig",
+            "org.freedesktop.DBus.Properties",
+            "Set",
+            GLib.Variant(
+                "(ssv)",
+                (
+                    "org.gnome.Mutter.DisplayConfig",
+                    "PowerSaveMode",
+                    GLib.Variant("i", power_mode),
+                ),
+            ),
+            None,
+            Gio.DBusCallFlags.NONE,
+            3000,
+            None,
+        )
+        print(f"[VDISPLAY] Set Mutter PowerSaveMode={power_mode} ({power_action}) on {proxy_name}")
+    except Exception as exc:
+        print(f"[VDISPLAY] Setting PowerSaveMode={power_mode} failed: {exc}", file=sys.stderr)
 )PY";
     script.close();
 
@@ -2720,16 +2904,27 @@ print(
       return false;
     }
 
+    // Whitelist the power token so only a known literal can ever reach the shell.
+    const char *power_token = "none";
+    if (physical_power == "off") {
+      power_token = "off";
+    } else if (physical_power == "on") {
+      power_token = "on";
+    }
+
     std::ostringstream command;
-    command << "timeout 5s python3 " << script_path << ' '
+    command << "timeout 8s python3 " << script_path << ' '
             << width << ' '
             << height << ' '
             << refresh_hz << ' '
-            << (isolate ? 1 : 0);
+            << (isolate ? 1 : 0) << " '"
+            << primary_override << "' "
+            << (restore_mode ? 1 : 0) << ' '
+            << power_token;
 
     int result = std::system(command.str().c_str());
     if (result == 0) {
-      BOOST_LOG(info) << "[VDISPLAY] Mutter display layout applied for EVDI virtual display.";
+      BOOST_LOG(info) << "[VDISPLAY] Mutter display layout applied successfully.";
       return true;
     }
 
@@ -3290,7 +3485,7 @@ print(
             BOOST_LOG(warning) << "[VDISPLAY] Mutter/PipeWire virtual display mode changes require stream recreation; "
                                << vdinfo.name << " will keep its active PipeWire mode until the next session.";
           }
-          BOOST_LOG(info) << "[VDISPLAY] Mutter/PipeWire virtual display mode recorded successfully.";
+          BOOST_LOG(info) << "[VDISPLAY] Mutter/PipeWire virtual display mode recorded; desktop layout is applied by the capture stream after the first frame.";
           return 0;
         }
 
@@ -3473,6 +3668,74 @@ print(
     return false;
   }
 
+  // Make the Mutter RecordVirtual head (Meta-0) the sole primary so the real desktop
+  // renders onto it. Must be called AFTER the capture consumer is pulling frames (the
+  // head only exists once a consumer is engaged). Snapshots mode under the lock, then
+  // runs the (subprocess) helper without holding it.
+  bool applyMutterDisplayLayout(const std::string &displayName, bool isolate) {
+    uint32_t width = 0, height = 0, fps = 0;
+    bool found = false;
+    {
+      std::lock_guard<std::mutex> lock(vdisplay_mutex);
+      for (const auto &[guid, vdinfo] : virtual_displays) {
+        if (vdinfo.active && vdinfo.name == displayName && vdinfo.backend == BACKEND::MUTTER_PIPEWIRE) {
+          width = vdinfo.width;
+          height = vdinfo.height;
+          fps = vdinfo.fps;
+          found = true;
+          break;
+        }
+      }
+    }
+    if (!found) {
+      BOOST_LOG(warning) << "[VDISPLAY] applyMutterDisplayLayout: no active Mutter/PipeWire display named " << displayName;
+      return false;
+    }
+    const uint32_t refresh_hz = std::max<uint32_t>(1, fps / 1000);
+    BOOST_LOG(info) << "[VDISPLAY] Applying Mutter/PipeWire desktop layout for " << displayName
+                    << " (" << width << "x" << height << "@" << refresh_hz << "Hz, isolate=" << isolate << ").";
+    // When isolating onto Meta-0, also DPMS-off the physical output: on NVIDIA, removing it from
+    // the layout leaves the panel lit on a frozen frame. "none" when not isolating.
+    if (!apply_mutter_display_config(width, height, refresh_hz, isolate, std::string(), false, isolate ? "off" : "none")) {
+      BOOST_LOG(warning) << "[VDISPLAY] applyMutterDisplayLayout failed for " << displayName;
+      return false;
+    }
+    std::this_thread::sleep_for(750ms);
+    return true;
+  }
+
+  // Re-promote the saved physical connector to primary (dropping the virtual head) while
+  // the stream still exists, so destroying Meta-0 does not leave GNOME headless.
+  bool restoreMutterPhysicalPrimary(const std::string &displayName) {
+    std::string primary;
+    bool is_mutter = false;
+    {
+      std::lock_guard<std::mutex> lock(vdisplay_mutex);
+      for (const auto &[guid, vdinfo] : virtual_displays) {
+        if (vdinfo.name == displayName && vdinfo.backend == BACKEND::MUTTER_PIPEWIRE) {
+          is_mutter = true;
+          primary = vdinfo.saved_primary_connector;
+          break;
+        }
+      }
+    }
+    if (!is_mutter) {
+      return false;  // not a Mutter/PipeWire display; nothing to restore
+    }
+    if (primary.empty()) {
+      BOOST_LOG(warning) << "[VDISPLAY] restoreMutterPhysicalPrimary: no saved primary for " << displayName
+                         << "; attempting to promote any available physical monitor.";
+    } else {
+      BOOST_LOG(info) << "[VDISPLAY] Restoring physical primary monitor '" << primary
+                      << "' before tearing down " << displayName << '.';
+    }
+    // restore_mode=true so an empty/stale saved connector still falls back to ANY physical
+    // monitor rather than no-op'ing (which would leave the virtual head primary on teardown).
+    // physical_power="on" wakes the panel we DPMS-off'd during isolate (re-adding it to the
+    // layout alone may leave it in power-save on NVIDIA).
+    return apply_mutter_display_config(0, 0, 0, false, primary, /*restore_mode=*/true, /*physical_power=*/"on");
+  }
+
   bool getGamescopePipeWireNodeId(const std::string &displayName, uint32_t &node_id) {
     std::lock_guard<std::mutex> lock(vdisplay_mutex);
     for (const auto &[guid, vdinfo] : virtual_displays) {
@@ -3577,7 +3840,7 @@ print(
     ++cursor.serial;
   }
 
-  static std::optional<int> gamescope_ei_button_code(int button) {
+  static std::optional<int> pointer_button_to_evdev(int button) {
     switch (button) {
       case 0x01:
         return BTN_LEFT;
@@ -3731,6 +3994,14 @@ print(
 
   bool notifyMutterPointerButton(int button, bool release) {
 #ifdef SUNSHINE_BUILD_PIPEWIRE
+    // Mutter's NotifyPointerButton expects a Linux evdev button code (BTN_LEFT, BTN_RIGHT, ...),
+    // not Sunshine's 1/2/3 button index. Translate first; an unmapped button falls through to
+    // the uinput path rather than injecting a bogus code.
+    auto code = pointer_button_to_evdev(button);
+    if (!code) {
+      return false;
+    }
+
     mutter_remote_desktop_target_t target;
     if (!get_active_mutter_remote_desktop_target(target, false)) {
       return false;
@@ -3739,7 +4010,7 @@ print(
     return queue_mutter_remote_desktop_event(
       target,
       "NotifyPointerButton",
-      g_variant_new("(ib)", button, !release)
+      g_variant_new("(ib)", *code, !release)
     );
 #else
     (void) button;
@@ -3769,6 +4040,25 @@ print(
 #endif
   }
 
+  bool notifyMutterKeyboardKeycode(uint32_t evdev_keycode, bool release) {
+#ifdef SUNSHINE_BUILD_PIPEWIRE
+    mutter_remote_desktop_target_t target;
+    if (!get_active_mutter_remote_desktop_target(target, false)) {
+      return false;
+    }
+
+    return queue_mutter_remote_desktop_event(
+      target,
+      "NotifyKeyboardKeycode",
+      g_variant_new("(ub)", evdev_keycode, !release)
+    );
+#else
+    (void) evdev_keycode;
+    (void) release;
+    return false;
+#endif
+  }
+
   bool notifyGamescopePointerMotionRelative(double dx, double dy) {
     auto target = active_gamescope_input_target();
     if (!target || !target->input || !target->input->pointer_motion_relative(dx, dy)) {
@@ -3789,7 +4079,7 @@ print(
 
   bool notifyGamescopePointerButton(int button, bool release) {
     auto input = active_gamescope_input();
-    auto mapped_button = gamescope_ei_button_code(button);
+    auto mapped_button = pointer_button_to_evdev(button);
     return input && mapped_button && input->pointer_button(*mapped_button, release);
   }
 

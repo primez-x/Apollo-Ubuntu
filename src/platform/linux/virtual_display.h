@@ -249,6 +249,18 @@ namespace VDISPLAY {
   bool getMutterPipeWireNodeId(const std::string &displayName, uint32_t &node_id);
 
   /**
+   * @brief Make the Mutter RecordVirtual head the sole primary so the real desktop renders onto it.
+   *        Call AFTER the capture consumer is pulling frames (the head only exists once consumed).
+   */
+  bool applyMutterDisplayLayout(const std::string &displayName, bool isolate);
+
+  /**
+   * @brief Re-promote the saved physical primary before tearing down the Mutter virtual head,
+   *        to avoid leaving GNOME with a destroyed primary (headless lockout).
+   */
+  bool restoreMutterPhysicalPrimary(const std::string &displayName);
+
+  /**
    * @brief Get the PipeWire node id for a Gamescope-owned virtual display.
    * @param displayName The virtual display name.
    * @param node_id Output PipeWire node id.
@@ -299,6 +311,14 @@ namespace VDISPLAY {
    * @return true if the event was queued to Mutter.
    */
   bool notifyMutterPointerAxis(double dx, double dy);
+
+  /**
+   * @brief Send a keyboard key event (evdev keycode) to the active Mutter remote desktop session.
+   * @param evdev_keycode Linux evdev keycode.
+   * @param release true when releasing the key, false when pressing it.
+   * @return true if the event was queued to Mutter.
+   */
+  bool notifyMutterKeyboardKeycode(uint32_t evdev_keycode, bool release);
 
   bool notifyGamescopePointerMotionRelative(double dx, double dy);
 
