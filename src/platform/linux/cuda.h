@@ -39,6 +39,23 @@ namespace cuda {
   std::unique_ptr<platf::avcodec_encode_device_t> make_avcodec_gl_encode_device(int width, int height, int offset_x, int offset_y);
   std::unique_ptr<platf::avcodec_encode_device_t> make_avcodec_gl_encode_device(int width, int height, int offset_x, int offset_y, int drm_fd);
 
+  /**
+   * @brief Query the DRM format modifiers the GL->CUDA importer can accept.
+   *
+   * Builds a throwaway GBM/EGL display on the encode GPU's DRM node and queries
+   * egl::query_dmabuf_modifiers for each supplied DRM fourcc. When @p drm_fd is
+   * >= 0 the probe display is built on a dup() of that fd (the resolved encode
+   * GPU); when -1 it falls back to the legacy CUDA device 0 node
+   * (open_drm_fd_for_cuda_device(0)). The union of the importable
+   * (non-external-only) modifiers is returned. The probe display is torn down
+   * before returning. Returns empty on any failure.
+   *
+   * @param fourccs DRM fourccs (e.g. DRM_FORMAT_XRGB8888) to query.
+   * @param drm_fd DRM render-node fd of the encode GPU, or -1 to use CUDA device 0.
+   * @return The union of importable modifiers across the fourccs; empty on failure.
+   */
+  std::vector<std::uint64_t> query_importable_modifiers(const std::vector<std::uint32_t> &fourccs, int drm_fd = -1);
+
   int init();
 }  // namespace cuda
 

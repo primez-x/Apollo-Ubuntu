@@ -5,8 +5,10 @@
 #pragma once
 
 // standard includes
+#include <cstdint>
 #include <optional>
 #include <string_view>
+#include <vector>
 
 // lib includes
 #include <glad/egl.h>
@@ -245,6 +247,21 @@ namespace egl {
    * @return An initialized EGL display or nullptr on failure.
    */
   display_t make_device_display(void *device);
+
+  /**
+   * @brief Query the DRM format modifiers the EGL importer accepts for a fourcc.
+   *
+   * Uses eglQueryDmaBufModifiersEXT (EGL_EXT_image_dma_buf_import_modifiers) to
+   * enumerate the modifiers that can be imported for @p fourcc on @p display.
+   * Only modifiers with external_only == 0 are returned, since the import path
+   * binds the resulting EGLImage as a GL_TEXTURE_2D (external-only modifiers,
+   * e.g. LINEAR on NVIDIA, cannot be sampled that way).
+   *
+   * @param display The EGL display whose importer to query.
+   * @param fourcc The DRM fourcc (e.g. DRM_FORMAT_XRGB8888) to query.
+   * @return The importable, non-external-only modifiers; empty on failure.
+   */
+  std::vector<std::uint64_t> query_dmabuf_modifiers(display_t::pointer display, std::uint32_t fourcc);
 
   std::optional<ctx_t> make_ctx(display_t::pointer display);
 

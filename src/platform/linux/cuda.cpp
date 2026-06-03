@@ -3,6 +3,7 @@
  * @brief Definitions for CUDA encoding.
  */
 // standard includes
+#include <algorithm>
 #include <bitset>
 #include <fcntl.h>
 #include <filesystem>
@@ -274,6 +275,64 @@ namespace cuda {
 
     BOOST_LOG(error) << "Unable to find DRM device with PCI bus ID: "sv << pci_bus_id.data();
     return -1;
+  }
+
+  std::vector<std::uint64_t> query_importable_modifiers(const std::vector<std::uint32_t> &fourccs, int drm_fd) {
+    std::vector<std::uint64_t> result;
+
+    if (!cdf) {
+      BOOST_LOG(warning) << "CUDA not initialized; cannot query importable DMA-BUF modifiers."sv;
+      return result;
+    }
+
+    // Build the probe display on the SAME DRM node the GL->CUDA encode device
+    // will use. When a caller-supplied fd is provided (the resolved encode GPU),
+    // dup() it so we own a private fd for the throwaway GBM device; otherwise
+    // fall back to the legacy CUDA-device-0 behavior.
+    file_t file;
+    if (drm_fd >= 0) {
+      file.el = dup(drm_fd);
+      if (file.el < 0) {
+        BOOST_LOG(warning) << "Couldn't dup provided DRM FD to query importable DMA-BUF modifiers."sv;
+        return result;
+      }
+    } else {
+      // Open the EXACT same DRM node the GL->CUDA encode device opens (device 0).
+      file = open_drm_fd_for_cuda_device(0);
+      if (file.el < 0) {
+        BOOST_LOG(warning) << "Couldn't open DRM FD for CUDA device 0 to query importable DMA-BUF modifiers."sv;
+        return result;
+      }
+    }
+
+    if (gbm::init() || !gbm::create_device) {
+      BOOST_LOG(warning) << "GBM not available; cannot query importable DMA-BUF modifiers."sv;
+      return result;
+    }
+
+    gbm::gbm_t gbm {gbm::create_device(file.el)};
+    if (!gbm) {
+      BOOST_LOG(warning) << "Couldn't create GBM device; cannot query importable DMA-BUF modifiers."sv;
+      return result;
+    }
+
+    egl::display_t display = egl::make_display(gbm.get());
+    if (!display) {
+      BOOST_LOG(warning) << "Couldn't create EGL display on CUDA device; cannot query importable DMA-BUF modifiers."sv;
+      return result;
+    }
+
+    for (auto fourcc : fourccs) {
+      auto modifiers = egl::query_dmabuf_modifiers(display.get(), fourcc);
+      for (auto modifier : modifiers) {
+        if (std::find(result.begin(), result.end(), modifier) == result.end()) {
+          result.push_back(modifier);
+        }
+      }
+    }
+
+    // display/gbm/file are torn down here as they leave scope.
+    return result;
   }
 
   int get_cuda_device_index_for_drm_fd(int drm_fd) {

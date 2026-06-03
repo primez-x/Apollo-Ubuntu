@@ -10,7 +10,7 @@ It keeps Apollo's Moonlight/Artemis streaming workflow while maintaining the GNO
 - **Kernel-free virtual display streaming on GNOME Wayland.** A real virtual monitor is created entirely through GNOME Mutter's RecordVirtual D-Bus API — no out-of-tree kernel module to build or load.
 - **Secure Boot safe.** There is no DKMS module to sign and no MOK (`Machine Owner Key`) enrollment, so UEFI Secure Boot can stay enabled.
 - **Real, isolated desktop.** Streamed sessions render onto a dedicated virtual head instead of mirroring the physical display; the real desktop and its windows relocate onto it, and the physical monitor is powered down while streaming.
-- **High resolution and high frame rate.** Native client resolution up to 4K, with 120 fps+ capture (verified at 2880x1800), paced by the compositor. Frames are delivered over PipeWire as CPU-mapped buffers by default; zero-copy DMA-BUF capture is opt-in and experimental (see [Virtual Display Backend](#virtual-display-backend)).
+- **High resolution and high frame rate.** Native client resolution up to 4K, with 120 fps+ capture (verified at 2880x1800), paced by the compositor. Capture is zero-copy DMA-BUF (GPU→encoder) when the encode GPU matches GNOME's, with automatic fallback to a CPU-mapped path otherwise (see [Virtual Display Backend](#virtual-display-backend)).
 - **AMD, Intel, and NVIDIA encoding** through the Linux encoder stack available on the host.
 - **Optional Gamescope backend** for launching games into an Apollo-owned headless compositor.
 - User service packaging, udev rules, PipeWire integration, and Ubuntu install documentation.
@@ -189,7 +189,7 @@ Default:
 ```text
 linux_virtual_display_backend = auto
 linux_virtual_capture_backend = auto
-linux_pipewire_dmabuf = off
+linux_pipewire_dmabuf = auto
 linux_gamescope_session_command =
 ```
 
@@ -213,17 +213,26 @@ Per-app backend routing:
 
 Capture acceleration:
 
-By default the compositor delivers frames over PipeWire as CPU-mapped buffers (a GPU→CPU→encoder
-copy), which sustains 120 fps+ at the tested resolutions. Zero-copy DMA-BUF (GPU→encoder) is the
-intended optimization but is still experimental: Mutter+NVIDIA DMA-BUF modifier negotiation does
-not yet succeed on this stack, so it is left off.
+By default Apollo uses zero-copy DMA-BUF capture (GPU→encoder, `data_type=3`) when the NVENC
+encode GPU matches the GPU GNOME composites on — this eliminates the per-frame GPU→CPU readback
+(copy time drops to microseconds) and gives headroom for 4K120. When zero-copy isn't possible it
+transparently falls back to CPU-mapped PipeWire buffers (a GPU→CPU→encoder copy), which still
+sustains 120 fps+ at the tested resolutions.
 
 - `linux_virtual_capture_backend = auto`: use the PipeWire path with the configured DMA-BUF policy.
 - `linux_virtual_capture_backend = pipewire`: force the Mutter/PipeWire capture path.
 - `linux_virtual_capture_backend = nvidia`: explicitly try NVIDIA/NvFBC capture for the active virtual display session.
 - `linux_pipewire_dmabuf = off`: keep the known-good mapped PipeWire frame path.
-- `linux_pipewire_dmabuf = auto`: reserved for future automatic DMA-BUF negotiation; currently uses mapped PipeWire frames.
+- `linux_pipewire_dmabuf = auto`: attempt zero-copy DMA-BUF and transparently fall back to the mapped path if import fails.
 - `linux_pipewire_dmabuf = force`: explicitly test DMA-BUF capture and fail the session if the compositor or encoder path cannot use it.
+
+Zero-copy DMA-BUF only works when the NVENC encode GPU is the same GPU GNOME composites on
+(the GPU driving the connected physical display); cross-GPU block-linear import fails. Apollo
+auto-detects that display GPU and routes the encoder, the DMA-BUF importer, and the modifier
+probe to it (you can override the choice with `adapter_name`, e.g. `adapter_name = /dev/dri/renderD129`).
+On multi-GPU systems where the encode GPU and the compositor GPU differ — or when detection
+misses (e.g. headless) — `auto` transparently falls back to the CPU-mapped path so video is
+never interrupted; the fallback happens once per session.
 
 When DMA-BUF diagnostics are enabled in logs, `data_type=3` means PipeWire delivered DMA-BUF. `data_type=1` or `data_type=2` means Apollo is on a mapped CPU/shared-memory fallback.
 

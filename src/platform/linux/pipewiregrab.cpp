@@ -16,6 +16,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <memory>
@@ -27,6 +28,7 @@
 
 // lib includes
 #include <drm_fourcc.h>
+#include <fcntl.h>
 #include <gio/gio.h>
 #include <pipewire/pipewire.h>
 #include <spa/buffer/meta.h>
@@ -34,6 +36,8 @@
 #include <spa/param/format-utils.h>
 #include <spa/param/video/format-utils.h>
 #include <spa/pod/builder.h>
+#include <spa/pod/iter.h>
+#include <spa/pod/pod.h>
 #include <unistd.h>
 
 // local includes
@@ -75,6 +79,119 @@ namespace platf {
 
       const char *pipewire_capture_mode_name(pipewire_capture_mode_e mode) {
         return mode == pipewire_capture_mode_e::DMABUF ? "dmabuf" : "mapped";
+      }
+
+      // Process-wide sticky DMA-BUF disable. Set once an AUTO-policy DMA-BUF import
+      // fails at runtime so the subsequent capture_e::reinit (which destroys and
+      // recreates the display + encode device) comes back on the mapped path and
+      // never re-attempts DMA-BUF — guaranteeing the fallback happens at most once.
+      std::atomic<bool> g_pipewire_dmabuf_disabled {false};
+
+      /**
+       * @brief Map a DRM primary node (cardN) to its render node path.
+       *
+       * Reads /sys/class/drm/<card>/device/drm/ and returns the first renderD*
+       * entry mapped to /dev/dri/renderDXXX. Returns empty if the card has no
+       * render node (e.g. a display-only KMS device).
+       */
+      std::string render_node_for_card(const std::string &card) {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        const fs::path drm_dir = fs::path("/sys/class/drm") / card / "device" / "drm";
+        for (const auto &entry : fs::directory_iterator(drm_dir, ec)) {
+          if (ec) {
+            break;
+          }
+          const auto name = entry.path().filename().string();
+          if (name.rfind("renderD", 0) == 0) {
+            return std::string("/dev/dri/") + name;
+          }
+        }
+        return {};
+      }
+
+      /**
+       * @brief Read the kernel driver name bound to a DRM card (e.g. "nvidia", "evdi").
+       */
+      std::string driver_for_card(const std::string &card) {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        const fs::path driver_link = fs::path("/sys/class/drm") / card / "device" / "driver";
+        const fs::path target = fs::read_symlink(driver_link, ec);
+        if (ec) {
+          return {};
+        }
+        return target.filename().string();
+      }
+
+      /**
+       * @brief Resolve the DRM render node the DMA-BUF encode/import path should use.
+       *
+       * The zero-copy DMA-BUF import only works when the NVENC encode GPU matches
+       * the GPU GNOME composites on (the GPU driving the physical display). This:
+       *   - honours config::video.adapter_name verbatim if set (manual override), else
+       *   - auto-detects the compositor GPU by scanning /sys/class/drm for a connected,
+       *     non-virtual connector (skips "Meta-*" virtual heads and "evdi" cards) and
+       *     maps that card to its render node.
+       *
+       * @param manual_override true if the returned path came from adapter_name.
+       * @return The /dev/dri/renderDXXX path, or empty when nothing suitable is found.
+       */
+      std::string resolve_dmabuf_encode_render_node(bool &manual_override) {
+        manual_override = false;
+
+        if (!config::video.adapter_name.empty()) {
+          manual_override = true;
+          return config::video.adapter_name;
+        }
+
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        for (const auto &entry : fs::directory_iterator("/sys/class/drm", ec)) {
+          if (ec) {
+            break;
+          }
+          if (!entry.is_directory()) {
+            continue;
+          }
+          const auto dir_name = entry.path().filename().string();
+
+          // Connector dirs look like "cardN-<connector>" (e.g. card3-DP-6).
+          if (dir_name.rfind("card", 0) != 0) {
+            continue;
+          }
+          const auto dash = dir_name.find('-');
+          if (dash == std::string::npos) {
+            continue;  // bare "cardN" entry, not a connector
+          }
+
+          const std::string card = dir_name.substr(0, dash);
+          const std::string connector = dir_name.substr(dash + 1);
+
+          // Skip Mutter's virtual head; we want the GPU GNOME actually composites on.
+          if (connector.rfind("Meta-", 0) == 0) {
+            continue;
+          }
+
+          // Only consider physically connected connectors.
+          std::ifstream status_file(entry.path() / "status");
+          std::string status;
+          if (!(status_file >> status) || status != "connected") {
+            continue;
+          }
+
+          // Skip virtual EVDI cards (Apollo's own virtual display path).
+          if (driver_for_card(card) == "evdi") {
+            continue;
+          }
+
+          auto render_node = render_node_for_card(card);
+          if (!render_node.empty()) {
+            return render_node;
+          }
+        }
+
+        return {};
       }
 
       constexpr std::uint32_t GAMESCOPE_FORMAT_REQUESTED_SIZE = 0x70000;
@@ -364,6 +481,14 @@ namespace platf {
 	        capture_max_copy_ms = 0;
 
 	        while (running) {
+	          // AUTO graceful fallback: a runtime DMA-BUF import failed. Reinitialize so
+	          // the video core rebuilds this session on the mapped path (the encode device
+	          // differs between paths, so it must be rebuilt). g_pipewire_dmabuf_disabled
+	          // stays set process-wide, so the rebuild does not re-attempt DMA-BUF.
+	          if (request_mapped_reinit_.load()) {
+	            return capture_e::reinit;
+	          }
+
 	          std::shared_ptr<img_t> img;
 	          if (!pull_free_image_cb(img)) {
 	            return capture_e::interrupted;
@@ -379,12 +504,16 @@ namespace platf {
 	            trigger_pipewire_process();
 	            lock.lock();
 	            frame_cv.wait_for(lock, frame_interval, [&]() {
-	              return !running || latest_generation != wanted_generation;
+	              return !running || request_mapped_reinit_.load() || latest_generation != wanted_generation;
 	            });
 	            wait_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wait_start).count();
 
 	            if (!running) {
 	              return capture_e::interrupted;
+	            }
+
+	            if (request_mapped_reinit_.load()) {
+	              return capture_e::reinit;
 	            }
 
 	            if (latest_dmabuf.valid && latest_generation != consumed_generation) {
@@ -470,6 +599,9 @@ namespace platf {
 #ifdef SUNSHINE_BUILD_CUDA
 	        if (mem_type == mem_type_e::cuda) {
 	          if (active_capture_mode == pipewire_capture_mode_e::DMABUF) {
+	            if (encode_drm_fd_ >= 0) {
+	              return cuda::make_avcodec_gl_encode_device(width, height, 0, 0, encode_drm_fd_);
+	            }
 	            return cuda::make_avcodec_gl_encode_device(width, height, 0, 0);
 	          }
 	          return cuda::make_avcodec_encode_device(width, height, false);
@@ -490,6 +622,15 @@ namespace platf {
 	        }
 
 	        dmabuf_policy = VDISPLAY::resolveLinuxPipeWireDmaBuf(config::video.linux_pipewire_dmabuf, environment_override);
+
+	        // A previous AUTO DMA-BUF import already failed this process: stay on the
+	        // mapped path for every subsequent (re)init so we never loop.
+	        if (g_pipewire_dmabuf_disabled.load() && dmabuf_policy == VDISPLAY::PIPEWIRE_DMABUF::AUTO) {
+	          dmabuf_allowed = false;
+	          BOOST_LOG(info) << "GNOME PipeWire DMA-BUF previously fell back to mapped this session; using mapped capture.";
+	          return;
+	        }
+
 	        const bool encoder_can_import_dmabuf =
 #ifdef SUNSHINE_BUILD_CUDA
 	          mem_type == mem_type_e::cuda ||
@@ -504,22 +645,70 @@ namespace platf {
 		          (std::strcmp(gamescope_dmabuf_override, "0") == 0 ||
 		           std::strcmp(gamescope_dmabuf_override, "off") == 0 ||
 		           std::strcmp(gamescope_dmabuf_override, "false") == 0);
+		        // AUTO now attempts DMA-BUF just like FORCE does for the OFFER, but with a
+		        // graceful runtime fallback to mapped (see on_stream_process). FORCE keeps
+		        // its hard-fail-on-miss semantics.
 		        dmabuf_allowed = (dmabuf_policy == VDISPLAY::PIPEWIRE_DMABUF::FORCE ||
+		                          dmabuf_policy == VDISPLAY::PIPEWIRE_DMABUF::AUTO ||
 		                          (gamescope_pipewire_capture && !gamescope_dmabuf_disabled)) &&
 		                         encoder_can_import_dmabuf;
 		        if (dmabuf_policy == VDISPLAY::PIPEWIRE_DMABUF::FORCE && !encoder_can_import_dmabuf) {
 		          dmabuf_policy_error = true;
 		          BOOST_LOG(error) << "PipeWire DMA-BUF capture was forced, but the selected encoder path cannot import DMA-BUF frames.";
-		        } else if (dmabuf_policy == VDISPLAY::PIPEWIRE_DMABUF::AUTO) {
-		          BOOST_LOG(info) << "PipeWire DMA-BUF auto negotiation is disabled pending live validation; using mapped PipeWire frames.";
+		        } else if (dmabuf_policy == VDISPLAY::PIPEWIRE_DMABUF::AUTO && encoder_can_import_dmabuf) {
+		          BOOST_LOG(info) << "PipeWire DMA-BUF auto negotiation is enabled; will fall back to mapped capture if import fails.";
 		        } else if (gamescope_pipewire_capture && gamescope_dmabuf_disabled) {
 		          BOOST_LOG(info) << "Gamescope/PipeWire DMA-BUF offer is disabled by APOLLO_GAMESCOPE_DMABUF.";
 		        } else if (gamescope_pipewire_capture && encoder_can_import_dmabuf) {
 		          BOOST_LOG(info) << "Gamescope/PipeWire capture will offer DMA-BUF first to match Gamescope's native stream path.";
 		        }
 
+		        // Resolve and open the render node for the encode/import GPU once, while
+		        // DMA-BUF is eligible. Everything (encode device, import display, CUDA
+		        // device index) follows this fd; -1 keeps the legacy CUDA-device-0 path.
+		        if (dmabuf_allowed && encode_drm_fd_ < 0) {
+		          bool manual_override = false;
+		          const std::string render_node = resolve_dmabuf_encode_render_node(manual_override);
+		          if (!render_node.empty()) {
+		            encode_drm_fd_ = open(render_node.c_str(), O_RDWR | O_CLOEXEC);
+		            if (encode_drm_fd_ < 0) {
+		              BOOST_LOG(warning) << "DMA-BUF encode GPU: failed to open " << render_node
+		                                 << " (" << strerror(errno) << "); using default CUDA device.";
+		            } else {
+		              BOOST_LOG(info) << "DMA-BUF encode GPU: " << render_node
+		                              << " (" << (manual_override ? "adapter_name" : "auto") << ')';
+		            }
+		          } else {
+		            BOOST_LOG(info) << "DMA-BUF encode GPU: none auto-detected; using default CUDA device.";
+		          }
+		        }
+
 	        BOOST_LOG(info) << "GNOME PipeWire DMA-BUF policy is "sv << VDISPLAY::linuxPipeWireDmaBufName(dmabuf_policy)
 	                        << "; capture import is " << (dmabuf_allowed ? "eligible" : "mapped");
+	      }
+
+	      // Query the importer's accepted DRM modifier set ONCE, on the SAME DRM node the
+	      // encoder opens, so the modifiers advertised in EnumFormat intersect what Mutter
+	      // composites into (NVIDIA block-linear). On failure the list stays empty and the
+	      // build_*_format functions fall back to the LINEAR-only offer (no regression).
+	      void query_importable_modifiers() {
+	        importable_modifiers_.clear();
+
+#ifdef SUNSHINE_BUILD_CUDA
+	        if (mem_type == mem_type_e::cuda) {
+	          // BGRx -> XRGB8888, BGRA -> ARGB8888 (the fourccs Apollo imports).
+	          // Probe on the resolved encode GPU (encode_drm_fd_), or CUDA device 0 (-1).
+	          importable_modifiers_ = cuda::query_importable_modifiers({DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888}, encode_drm_fd_);
+	        }
+#endif
+
+	        if (importable_modifiers_.empty()) {
+	          BOOST_LOG(warning) << "GNOME PipeWire DMA-BUF: no importable modifiers were discovered; "
+	                                "falling back to the LINEAR-only modifier offer.";
+	        } else {
+	          BOOST_LOG(info) << "GNOME PipeWire DMA-BUF: discovered " << importable_modifiers_.size()
+	                          << " importable modifier(s); advertising them in EnumFormat.";
+	        }
 	      }
 
       void update_buffer_data_type(bool use_dmabuf) {
@@ -535,6 +724,7 @@ namespace platf {
 
         std::array<const spa_pod *, 2> params {};
         std::uint32_t n_params = 0;
+
         params[n_params++] = static_cast<const spa_pod *>(spa_pod_builder_add_object(
             &builder,
             SPA_TYPE_OBJECT_ParamBuffers,
@@ -578,58 +768,136 @@ namespace platf {
           return;
         }
 
+        // Parse media type/subtype: only raw video formats are negotiated here.
+        std::uint32_t media_type = 0;
+        std::uint32_t media_subtype = 0;
+        if (spa_format_parse(param, &media_type, &media_subtype) < 0) {
+          return;
+        }
+        if (media_type != SPA_MEDIA_TYPE_video || media_subtype != SPA_MEDIA_SUBTYPE_raw) {
+          return;
+        }
+
         spa_video_info_raw video_info {};
         if (spa_format_video_raw_parse(param, &video_info) < 0) {
           return;
         }
 
-	        const bool negotiated_dmabuf = (video_info.flags & SPA_VIDEO_FLAG_MODIFIER) != 0;
-	        const bool use_dmabuf = self->dmabuf_allowed && negotiated_dmabuf;
+        // Inspect the modifier property directly: on the FIRST param_changed of a
+        // DONT_FIXATE handshake it is still an UNFIXED CHOICE and the parsed
+        // video_info.modifier is meaningless (yields 0/LINEAR which we never offered).
+        const spa_pod_prop *modifier_prop = spa_pod_find_prop(param, nullptr, SPA_FORMAT_VIDEO_modifier);
+        const bool modifier_is_unfixed_choice =
+          modifier_prop != nullptr &&
+          spa_pod_is_choice(&modifier_prop->value) &&
+          SPA_POD_CHOICE_TYPE(&modifier_prop->value) != SPA_CHOICE_None;
 
-	        {
-	          std::lock_guard lock(self->frame_mutex);
-	          self->pipewire_format = video_info.format;
-	          self->pipewire_modifier = negotiated_dmabuf ? video_info.modifier : DRM_FORMAT_MOD_INVALID;
-	          self->active_capture_mode = use_dmabuf ? pipewire_capture_mode_e::DMABUF : pipewire_capture_mode_e::MAPPED;
-	          if (video_info.size.width > 0 && video_info.size.height > 0) {
-	            self->latest_width = static_cast<int>(video_info.size.width);
-	            self->latest_height = static_cast<int>(video_info.size.height);
-	            self->width = self->latest_width;
-	            self->height = self->latest_height;
-	            self->env_width = self->width;
-	            self->env_height = self->height;
-	          }
+        // CASE 1 — unfixed modifier choice: pick the first offered value that we can
+        // import and re-announce a single, fixed EnumFormat (no DONT_FIXATE, no choice).
+        // The server will then re-send param_changed with the now-fixed format (CASE 2).
+        if (modifier_is_unfixed_choice && self->dmabuf_allowed && !self->dmabuf_modifier_fixated) {
+          std::uint64_t chosen_modifier = DRM_FORMAT_MOD_INVALID;
+          bool found = false;
 
-	          if (self->dmabuf_policy == VDISPLAY::PIPEWIRE_DMABUF::FORCE && !use_dmabuf) {
-	            self->format_failed = true;
-	          }
-	          self->format_ready = true;
-	        }
+          const std::uint32_t n_values = SPA_POD_CHOICE_N_VALUES(&modifier_prop->value);
+          const std::uint64_t *values =
+            static_cast<const std::uint64_t *>(SPA_POD_CHOICE_VALUES(&modifier_prop->value));
+          for (std::uint32_t i = 0; i < n_values; ++i) {
+            const std::uint64_t candidate = values[i];
+            if (std::find(self->importable_modifiers_.begin(), self->importable_modifiers_.end(), candidate) !=
+                self->importable_modifiers_.end()) {
+              chosen_modifier = candidate;
+              found = true;
+              break;
+            }
+          }
 
-	        self->update_buffer_data_type(use_dmabuf);
-	        self->format_cv.notify_all();
+          if (found) {
+            std::uint8_t fixate_buffer[1024];
+            spa_pod_builder builder = SPA_POD_BUILDER_INIT(fixate_buffer, sizeof(fixate_buffer));
+            const spa_rectangle fixed_size {video_info.size.width, video_info.size.height};
+            const spa_fraction max_rate {self->framerate, 1};
+            const spa_fraction min_rate {1, 1};
 
-	        BOOST_LOG(info) << "GNOME PipeWire capture format "
-	                        << self->latest_width << 'x' << self->latest_height
-	                        << " spa_format=" << static_cast<int>(self->pipewire_format)
-	                        << " modifier=" << self->pipewire_modifier
-	                        << " capture_path=" << pipewire_capture_mode_name(self->active_capture_mode);
+            spa_pod_frame format_frame {};
+            spa_pod_builder_push_object(&builder, &format_frame, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
+            spa_pod_builder_add(
+              &builder,
+              SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+              SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+              SPA_FORMAT_VIDEO_format, SPA_POD_Id(video_info.format),
+              SPA_FORMAT_VIDEO_size, SPA_POD_Rectangle(&fixed_size),
+              SPA_FORMAT_VIDEO_maxFramerate, SPA_POD_CHOICE_RANGE_Fraction(&max_rate, &min_rate, &max_rate),
+              0
+            );
+            spa_pod_builder_prop(&builder, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY);
+            spa_pod_builder_long(&builder, static_cast<std::int64_t>(chosen_modifier));
+            const spa_pod *fixate_format = static_cast<const spa_pod *>(spa_pod_builder_pop(&builder, &format_frame));
 
-	        // RecordVirtual desktop layout: once a format is negotiated the Mutter virtual head
-	        // (Meta-0) has materialized, so make it the sole primary to relocate the real desktop
-	        // onto it. One-shot (atomic), off-thread (helper runs a subprocess up to ~8s).
-	        if (self->is_mutter_pipewire) {
-	          bool expected = false;
-	          if (self->mutter_layout_applied.compare_exchange_strong(expected, true)) {
-	            BOOST_LOG(info) << "GNOME PipeWire format ready for " << self->display_name
-	                            << "; applying RecordVirtual desktop layout (isolate).";
-	            std::string layout_name = self->display_name;
-	            std::thread([layout_name]() {
-	              VDISPLAY::applyMutterDisplayLayout(layout_name, true);
-	            }).detach();
-	          }
-	        }
-	      }
+            const spa_pod *params[1] = {fixate_format};
+            self->dmabuf_modifier_fixated = true;
+            BOOST_LOG(info) << "GNOME PipeWire DMA-BUF: fixating DMA-BUF modifier 0x"
+                            << std::hex << chosen_modifier << std::dec;
+            if (pw_stream_update_params(self->stream, params, 1) < 0) {
+              BOOST_LOG(warning) << "GNOME PipeWire DMA-BUF: failed to update params for modifier fixation.";
+            }
+            // Wait for the server to re-send param_changed with the fixed format.
+            return;
+          }
+          // No offered choice value is importable: fall through and treat as final/mapped.
+        }
+
+        // CASE 2 — final format: a single fixed modifier value, a mapped format with no
+        // modifier, or an unfixed choice with no importable match. Commit it and update
+        // buffers/meta only. Do NOT re-emit any EnumFormat here.
+        const bool negotiated_dmabuf =
+          (video_info.flags & SPA_VIDEO_FLAG_MODIFIER) != 0 && !modifier_is_unfixed_choice;
+        const bool use_dmabuf = self->dmabuf_allowed && negotiated_dmabuf;
+
+        {
+          std::lock_guard lock(self->frame_mutex);
+          self->pipewire_format = video_info.format;
+          self->pipewire_modifier = negotiated_dmabuf ? video_info.modifier : DRM_FORMAT_MOD_INVALID;
+          self->active_capture_mode = use_dmabuf ? pipewire_capture_mode_e::DMABUF : pipewire_capture_mode_e::MAPPED;
+          if (video_info.size.width > 0 && video_info.size.height > 0) {
+            self->latest_width = static_cast<int>(video_info.size.width);
+            self->latest_height = static_cast<int>(video_info.size.height);
+            self->width = self->latest_width;
+            self->height = self->latest_height;
+            self->env_width = self->width;
+            self->env_height = self->height;
+          }
+
+          if (self->dmabuf_policy == VDISPLAY::PIPEWIRE_DMABUF::FORCE && !use_dmabuf) {
+            self->format_failed = true;
+          }
+          self->format_ready = true;
+        }
+
+        self->update_buffer_data_type(use_dmabuf);
+        self->format_cv.notify_all();
+
+        BOOST_LOG(info) << "GNOME PipeWire capture format "
+                        << self->latest_width << 'x' << self->latest_height
+                        << " spa_format=" << static_cast<int>(self->pipewire_format)
+                        << " modifier=" << self->pipewire_modifier
+                        << " capture_path=" << pipewire_capture_mode_name(self->active_capture_mode);
+
+        // RecordVirtual desktop layout: once a format is negotiated the Mutter virtual head
+        // (Meta-0) has materialized, so make it the sole primary to relocate the real desktop
+        // onto it. One-shot (atomic), off-thread (helper runs a subprocess up to ~8s).
+        if (self->is_mutter_pipewire) {
+          bool expected = false;
+          if (self->mutter_layout_applied.compare_exchange_strong(expected, true)) {
+            BOOST_LOG(info) << "GNOME PipeWire format ready for " << self->display_name
+                            << "; applying RecordVirtual desktop layout (isolate).";
+            std::string layout_name = self->display_name;
+            std::thread([layout_name]() {
+              VDISPLAY::applyMutterDisplayLayout(layout_name, true);
+            }).detach();
+          }
+        }
+      }
 
 	      static void on_stream_process(void *data) {
 		        auto self = static_cast<pipewire_display_t *>(data);
@@ -654,6 +922,9 @@ namespace platf {
 	              BOOST_LOG(error) << "Forced PipeWire DMA-BUF capture received an unimportable buffer; stopping capture.";
 	              self->running = false;
 	              self->frame_cv.notify_all();
+	            } else if (self->dmabuf_policy == VDISPLAY::PIPEWIRE_DMABUF::AUTO) {
+	              // AUTO: never break video, fall back to mapped (rebuilds the session once).
+	              self->fall_back_to_mapped_capture();
 	            }
 	            pw_stream_queue_buffer(self->stream, buffer);
 	            return;
@@ -925,6 +1196,93 @@ namespace platf {
         );
       }
 
+	      // Build the EnumFormat params for the current dmabuf_allowed state and connect
+	      // the stream. The PipeWire thread loop MUST be locked by the caller. Shared by
+	      // the initial connect and the AUTO mapped-fallback reconnect path.
+	      bool connect_stream_params_locked() {
+	        if (dmabuf_allowed) {
+	          query_importable_modifiers();
+	        }
+
+	        std::uint8_t params_buffer[4096];
+	        spa_pod_builder builder = SPA_POD_BUILDER_INIT(params_buffer, sizeof(params_buffer));
+	        const spa_rectangle requested_size {static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height)};
+	        const spa_rectangle min_size {1, 1};
+	        const spa_fraction no_fixed_rate {0, 1};
+	        const spa_fraction requested_rate {framerate, 1};
+	        const spa_fraction min_rate {1, 1};
+
+	        std::array<const spa_pod *, 6> params {};
+	        std::uint32_t n_params = 0;
+
+	        if (gamescope_pipewire_capture) {
+	          if (dmabuf_allowed) {
+	            params[n_params++] = build_gamescope_pipewire_format(&builder, true, requested_size, min_size, requested_rate);
+	          }
+	          params[n_params++] = build_gamescope_pipewire_format(&builder, false, requested_size, min_size, requested_rate);
+	        } else {
+	          if (dmabuf_allowed) {
+	            params[n_params++] = build_pipewire_format(&builder, SPA_VIDEO_FORMAT_BGRx, true, requested_size, min_size, no_fixed_rate, requested_rate, min_rate);
+	            params[n_params++] = build_pipewire_format(&builder, SPA_VIDEO_FORMAT_BGRA, true, requested_size, min_size, no_fixed_rate, requested_rate, min_rate);
+	          }
+
+	          if (dmabuf_policy != VDISPLAY::PIPEWIRE_DMABUF::FORCE) {
+	            params[n_params++] = static_cast<const spa_pod *>(spa_pod_builder_add_object(
+	              &builder,
+	              SPA_TYPE_OBJECT_Format,
+	              SPA_PARAM_EnumFormat,
+	              SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
+	              SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+	              SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(4, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBA),
+	              SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&requested_size, &min_size, &requested_size),
+	              SPA_FORMAT_VIDEO_framerate, SPA_POD_Fraction(&no_fixed_rate),
+	              SPA_FORMAT_VIDEO_maxFramerate, SPA_POD_CHOICE_RANGE_Fraction(&requested_rate, &min_rate, &requested_rate)
+	            ));
+	          }
+	        }
+
+	        if (n_params == 0) {
+	          BOOST_LOG(error) << "No PipeWire capture formats are available for the selected DMA-BUF policy.";
+	          return false;
+	        }
+
+	        const auto target_id = gamescope_pipewire_capture ? PW_ID_ANY : node_id;
+	        if (gamescope_pipewire_capture) {
+	          BOOST_LOG(info) << "Connecting Gamescope PipeWire capture via target.object=" << GAMESCOPE_PIPEWIRE_TARGET
+	                          << " node_hint=" << node_id;
+	        }
+	        // Reset the two-step DMA-BUF handshake guard so a (re)connect re-runs fixation.
+	        dmabuf_modifier_fixated = false;
+	        if (pw_stream_connect(stream, PW_DIRECTION_INPUT, target_id, stream_flags, params.data(), n_params) < 0) {
+	          BOOST_LOG(error) << "Unable to connect PipeWire stream to "
+	                           << (gamescope_pipewire_capture ? GAMESCOPE_PIPEWIRE_TARGET : "GNOME node")
+	                           << ' ' << node_id;
+	          return false;
+	        }
+	        return true;
+	      }
+
+	      // AUTO graceful fallback: a DMA-BUF buffer could not be imported. Disable
+	      // DMA-BUF for the rest of the process (sticky, anti-loop) and ask the video
+	      // core to rebuild the session in mapped mode. The sticky decision is process
+	      // -wide (g_pipewire_dmabuf_disabled) so that the capture_e::reinit teardown,
+	      // which destroys and recreates this display + its encode device, comes back on
+	      // the mapped path instead of re-offering DMA-BUF and looping. We use reinit
+	      // (not an in-place stream reconnect) because the encode device itself differs
+	      // between the two paths: the DMA-BUF path builds a GL->CUDA importer while the
+	      // mapped path builds the RAM-upload encoder, so both must be rebuilt together.
+	      void fall_back_to_mapped_capture() {
+	        bool expected = false;
+	        if (!dmabuf_disabled_for_session_.compare_exchange_strong(expected, true)) {
+	          return;  // already falling back / fell back: never loop
+	        }
+	        g_pipewire_dmabuf_disabled.store(true);
+	        request_mapped_reinit_.store(true);
+	        BOOST_LOG(warning) << "DMA-BUF import failed; falling back to mapped PipeWire capture.";
+	        // Wake the capture loop so it observes the reinit request promptly.
+	        frame_cv.notify_all();
+	      }
+
 	      bool start_pipewire_stream() {
 	        if (dmabuf_policy_error) {
 	          return false;
@@ -994,59 +1352,9 @@ namespace platf {
           flags = static_cast<pw_stream_flags>(flags | PW_STREAM_FLAG_RT_PROCESS);
         }
 
-	        std::uint8_t params_buffer[4096];
-	        spa_pod_builder builder = SPA_POD_BUILDER_INIT(params_buffer, sizeof(params_buffer));
-	        const spa_rectangle requested_size {static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height)};
-	        const spa_rectangle min_size {1, 1};
-	        const spa_fraction no_fixed_rate {0, 1};
-	        const spa_fraction requested_rate {framerate, 1};
-	        const spa_fraction min_rate {1, 1};
-
-		        std::array<const spa_pod *, 6> params {};
-		        std::uint32_t n_params = 0;
-
-		        if (gamescope_pipewire_capture) {
-		          if (dmabuf_allowed) {
-		            params[n_params++] = build_gamescope_pipewire_format(&builder, true, requested_size, min_size, requested_rate);
-		          }
-		          params[n_params++] = build_gamescope_pipewire_format(&builder, false, requested_size, min_size, requested_rate);
-		        } else {
-		          if (dmabuf_allowed) {
-		            params[n_params++] = build_pipewire_format(&builder, SPA_VIDEO_FORMAT_BGRx, true, requested_size, min_size, no_fixed_rate, requested_rate, min_rate);
-		            params[n_params++] = build_pipewire_format(&builder, SPA_VIDEO_FORMAT_BGRA, true, requested_size, min_size, no_fixed_rate, requested_rate, min_rate);
-		          }
-
-		          if (dmabuf_policy != VDISPLAY::PIPEWIRE_DMABUF::FORCE) {
-		            params[n_params++] = static_cast<const spa_pod *>(spa_pod_builder_add_object(
-		              &builder,
-		              SPA_TYPE_OBJECT_Format,
-		              SPA_PARAM_EnumFormat,
-		              SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
-		              SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-		              SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(4, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBA),
-		              SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&requested_size, &min_size, &requested_size),
-		              SPA_FORMAT_VIDEO_framerate, SPA_POD_Fraction(&no_fixed_rate),
-		              SPA_FORMAT_VIDEO_maxFramerate, SPA_POD_CHOICE_RANGE_Fraction(&requested_rate, &min_rate, &requested_rate)
-		            ));
-		          }
-		        }
-
-	        if (n_params == 0) {
-	          BOOST_LOG(error) << "No PipeWire capture formats are available for the selected DMA-BUF policy.";
+	        stream_flags = flags;
+	        if (!connect_stream_params_locked()) {
 	          pw_thread_loop_unlock(loop);
-	          return false;
-	        }
-
-		        const auto target_id = gamescope_pipewire_capture ? PW_ID_ANY : node_id;
-		        if (gamescope_pipewire_capture) {
-		          BOOST_LOG(info) << "Connecting Gamescope PipeWire capture via target.object=" << GAMESCOPE_PIPEWIRE_TARGET
-		                          << " node_hint=" << node_id;
-		        }
-		        if (pw_stream_connect(stream, PW_DIRECTION_INPUT, target_id, flags, params.data(), n_params) < 0) {
-		          pw_thread_loop_unlock(loop);
-		          BOOST_LOG(error) << "Unable to connect PipeWire stream to "
-		                           << (gamescope_pipewire_capture ? GAMESCOPE_PIPEWIRE_TARGET : "GNOME node")
-		                           << ' ' << node_id;
 	          return false;
 	        }
 
@@ -1136,10 +1444,23 @@ namespace platf {
 
 	        if (dmabuf) {
 	          spa_pod_frame choice {};
-	          spa_pod_builder_prop(builder, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY);
-	          spa_pod_builder_push_choice(builder, &choice, SPA_CHOICE_Enum, 0);
-	          spa_pod_builder_long(builder, DRM_FORMAT_MOD_LINEAR);
-	          spa_pod_builder_long(builder, DRM_FORMAT_MOD_LINEAR);
+	          if (!importable_modifiers_.empty()) {
+	            spa_pod_builder_prop(builder, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE);
+	            spa_pod_builder_push_choice(builder, &choice, SPA_CHOICE_Enum, 0);
+	            // First element is the default; repeat the full importer list. Do NOT offer
+	            // DRM_FORMAT_MOD_INVALID here: that lets the producer fixate to an implicit/INVALID
+	            // modifier we cannot import. Force one of the explicit block-linear modifiers.
+	            spa_pod_builder_long(builder, static_cast<std::int64_t>(importable_modifiers_[0]));
+	            for (auto modifier : importable_modifiers_) {
+	              spa_pod_builder_long(builder, static_cast<std::int64_t>(modifier));
+	            }
+	          } else {
+	            // No importable modifiers discovered: keep the original LINEAR-only behavior.
+	            spa_pod_builder_prop(builder, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY);
+	            spa_pod_builder_push_choice(builder, &choice, SPA_CHOICE_Enum, 0);
+	            spa_pod_builder_long(builder, DRM_FORMAT_MOD_LINEAR);
+	            spa_pod_builder_long(builder, DRM_FORMAT_MOD_LINEAR);
+	          }
 	          spa_pod_builder_pop(builder, &choice);
 	        }
 
@@ -1173,9 +1494,20 @@ namespace platf {
 	          spa_pod_frame choice {};
 	          spa_pod_builder_prop(builder, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY | SPA_POD_PROP_FLAG_DONT_FIXATE);
 	          spa_pod_builder_push_choice(builder, &choice, SPA_CHOICE_Enum, 0);
-	          spa_pod_builder_long(builder, DRM_FORMAT_MOD_LINEAR);
-	          spa_pod_builder_long(builder, DRM_FORMAT_MOD_LINEAR);
-	          spa_pod_builder_long(builder, DRM_FORMAT_MOD_INVALID);
+	          if (!importable_modifiers_.empty()) {
+	            // First element is the default; repeat the full importer list. Do NOT offer
+	            // DRM_FORMAT_MOD_INVALID here: that lets the producer fixate to an implicit/INVALID
+	            // modifier we cannot import. Force one of the explicit block-linear modifiers.
+	            spa_pod_builder_long(builder, static_cast<std::int64_t>(importable_modifiers_[0]));
+	            for (auto modifier : importable_modifiers_) {
+	              spa_pod_builder_long(builder, static_cast<std::int64_t>(modifier));
+	            }
+	          } else {
+	            // No importable modifiers discovered: keep the original LINEAR-only behavior.
+	            spa_pod_builder_long(builder, DRM_FORMAT_MOD_LINEAR);
+	            spa_pod_builder_long(builder, DRM_FORMAT_MOD_LINEAR);
+	            spa_pod_builder_long(builder, DRM_FORMAT_MOD_INVALID);
+	          }
 	          spa_pod_builder_pop(builder, &choice);
 	        }
 
@@ -1280,6 +1612,10 @@ namespace platf {
           g_object_unref(bus);
           bus = nullptr;
         }
+        if (encode_drm_fd_ >= 0) {
+          close(encode_drm_fd_);
+          encode_drm_fd_ = -1;
+        }
       }
 
       std::string display_name;
@@ -1301,6 +1637,7 @@ namespace platf {
       pw_context *context {};
       pw_core *core {};
       pw_stream *stream {};
+      pw_stream_flags stream_flags {};
 
 	      std::mutex frame_mutex;
 	      std::condition_variable format_cv;
@@ -1316,10 +1653,20 @@ namespace platf {
 		      std::chrono::steady_clock::time_point latest_timestamp {};
 		      spa_video_format pipewire_format {SPA_VIDEO_FORMAT_UNKNOWN};
 	      std::uint64_t pipewire_modifier {DRM_FORMAT_MOD_INVALID};
+	      std::vector<std::uint64_t> importable_modifiers_;
+	      bool dmabuf_modifier_fixated {false};
 	      VDISPLAY::PIPEWIRE_DMABUF dmabuf_policy {VDISPLAY::PIPEWIRE_DMABUF::OFF};
 	      pipewire_capture_mode_e active_capture_mode {pipewire_capture_mode_e::MAPPED};
 	      bool dmabuf_allowed {};
 	      bool dmabuf_policy_error {};
+	      // Sticky (per-display): once a runtime DMA-BUF import fails under AUTO we
+	      // trigger the mapped fallback exactly once. Guards against repeated triggers.
+	      std::atomic<bool> dmabuf_disabled_for_session_ {false};
+	      // Set when fall_back_to_mapped_capture() wants the capture loop to return
+	      // capture_e::reinit so the video core rebuilds the session in mapped mode.
+	      std::atomic<bool> request_mapped_reinit_ {false};
+	      // Owned render-node fd for the resolved DMA-BUF encode/import GPU (-1 if none).
+	      int encode_drm_fd_ {-1};
 	      bool format_ready {};
 	      bool format_failed {};
       bool logged_unexpected_unmapped_dmabuf {};

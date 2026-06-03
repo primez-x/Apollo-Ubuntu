@@ -445,6 +445,56 @@ namespace egl {
     return display;
   }
 
+#ifndef PFNEGLQUERYDMABUFMODIFIERSEXTPROC
+  typedef EGLBoolean(GLAD_API_PTR *PFNEGLQUERYDMABUFMODIFIERSEXTPROC)(EGLDisplay dpy, EGLint format, EGLint max_modifiers, EGLuint64KHR *modifiers, EGLBoolean *external_only, EGLint *num_modifiers);
+#endif
+
+  std::vector<std::uint64_t> query_dmabuf_modifiers(display_t::pointer display, std::uint32_t fourcc) {
+    std::vector<std::uint64_t> result;
+
+    auto eglQueryDmaBufModifiersEXT =
+      (PFNEGLQUERYDMABUFMODIFIERSEXTPROC) eglGetProcAddress("eglQueryDmaBufModifiersEXT");
+    if (!eglQueryDmaBufModifiersEXT) {
+      BOOST_LOG(warning) << "eglQueryDmaBufModifiersEXT not available; cannot enumerate importable DMA-BUF modifiers."sv;
+      return result;
+    }
+
+    // First call: learn how many modifiers exist for this format.
+    EGLint count = 0;
+    if (!eglQueryDmaBufModifiersEXT(display, static_cast<EGLint>(fourcc), 0, nullptr, nullptr, &count)) {
+      BOOST_LOG(warning) << "eglQueryDmaBufModifiersEXT (count) failed for fourcc ["sv
+                         << util::hex(fourcc).to_string_view() << "]: ["sv
+                         << util::hex(eglGetError()).to_string_view() << ']';
+      return result;
+    }
+
+    if (count <= 0) {
+      return result;
+    }
+
+    // Second call: fill modifiers + external_only flags.
+    std::vector<EGLuint64KHR> modifiers(count);
+    std::vector<EGLBoolean> external_only(count);
+    EGLint filled = 0;
+    if (!eglQueryDmaBufModifiersEXT(display, static_cast<EGLint>(fourcc), count, modifiers.data(), external_only.data(), &filled)) {
+      BOOST_LOG(warning) << "eglQueryDmaBufModifiersEXT (fill) failed for fourcc ["sv
+                         << util::hex(fourcc).to_string_view() << "]: ["sv
+                         << util::hex(eglGetError()).to_string_view() << ']';
+      return result;
+    }
+
+    for (EGLint i = 0; i < filled; ++i) {
+      // The import path samples as GL_TEXTURE_2D, so drop external_only modifiers
+      // (e.g. LINEAR on NVIDIA, which can only be bound as GL_TEXTURE_EXTERNAL_OES).
+      if (external_only[i]) {
+        continue;
+      }
+      result.push_back(static_cast<std::uint64_t>(modifiers[i]));
+    }
+
+    return result;
+  }
+
   std::optional<ctx_t> make_ctx(display_t::pointer display) {
     constexpr int conf_attr[] {
       EGL_RENDERABLE_TYPE,

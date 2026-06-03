@@ -498,7 +498,7 @@ namespace config {
     {},  // output_name
     "auto",  // linux_virtual_display_backend
     "auto",  // linux_virtual_capture_backend
-    "off",  // linux_pipewire_dmabuf
+    "auto",  // linux_pipewire_dmabuf
     {},  // linux_gamescope_session_command
 
     {
