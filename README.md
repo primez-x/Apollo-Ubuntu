@@ -1,18 +1,20 @@
 # Apollo Ubuntu
 
-Apollo Ubuntu is a Linux-focused fork of [Apollo](https://github.com/ClassicOldSong/Apollo) for Ubuntu GNOME Wayland hosts.
-It keeps Apollo's Moonlight/Artemis streaming workflow while maintaining the Linux virtual display and packaging work in this repository instead of trying to merge those Ubuntu-specific changes back into the Windows-first parent.
+Apollo Ubuntu is a GNOME Wayland fork of [Apollo](https://github.com/ClassicOldSong/Apollo), targeted at Ubuntu hosts running the GNOME (Mutter) desktop.
+It keeps Apollo's Moonlight/Artemis streaming workflow while maintaining the GNOME Wayland virtual display and packaging work in this repository instead of trying to merge those changes back into the Windows-first parent.
+
+> **Scope:** the virtual display is built on GNOME Mutter's D-Bus APIs (`ScreenCast`, `RemoteDesktop`, `DisplayConfig`). It requires a GNOME (Mutter) Wayland session and does **not** work on other compositors such as KDE/KWin or wlroots-based ones (Sway, Hyprland). It is portable across GNOME Wayland distributions with a recent enough Mutter, but Ubuntu is the only supported/packaged target.
 
 ## What This Fork Provides
 
 - **Kernel-free virtual display streaming on GNOME Wayland.** A real virtual monitor is created entirely through GNOME Mutter's RecordVirtual D-Bus API — no out-of-tree kernel module to build or load.
 - **Secure Boot safe.** There is no DKMS module to sign and no MOK (`Machine Owner Key`) enrollment, so UEFI Secure Boot can stay enabled.
 - **Real, isolated desktop.** Streamed sessions render onto a dedicated virtual head instead of mirroring the physical display; the real desktop and its windows relocate onto it, and the physical monitor is powered down while streaming.
-- **High resolution and frame rate.** Native and 4K resolutions with 120 fps+ capture, paced by the compositor.
+- **High resolution and high frame rate.** Native client resolution up to 4K, with 120 fps+ capture (verified at 2880x1800), paced by the compositor. Frames are delivered over PipeWire as CPU-mapped buffers by default; zero-copy DMA-BUF capture is opt-in and experimental (see [Virtual Display Backend](#virtual-display-backend)).
 - **AMD, Intel, and NVIDIA encoding** through the Linux encoder stack available on the host.
 - **Optional Gamescope backend** for launching games into an Apollo-owned headless compositor.
 - User service packaging, udev rules, PipeWire integration, and Ubuntu install documentation.
-- A cautious upstream-tracking workflow for reviewing ClassicOldSong/Apollo changes before merging them into this Linux fork.
+- A cautious upstream-tracking workflow for reviewing ClassicOldSong/Apollo changes before merging them into this GNOME Wayland fork.
 
 ## Supported Host
 
@@ -210,6 +212,11 @@ Per-app backend routing:
 - Leave the normal `Desktop` entry unset so it inherits the global `auto` (Mutter RecordVirtual) path.
 
 Capture acceleration:
+
+By default the compositor delivers frames over PipeWire as CPU-mapped buffers (a GPU→CPU→encoder
+copy), which sustains 120 fps+ at the tested resolutions. Zero-copy DMA-BUF (GPU→encoder) is the
+intended optimization but is still experimental: Mutter+NVIDIA DMA-BUF modifier negotiation does
+not yet succeed on this stack, so it is left off.
 
 - `linux_virtual_capture_backend = auto`: use the PipeWire path with the configured DMA-BUF policy.
 - `linux_virtual_capture_backend = pipewire`: force the Mutter/PipeWire capture path.
