@@ -2062,19 +2062,27 @@ namespace VDISPLAY {
     return true;
   }
 
-  // Prefer the private per-user runtime dir (mode 0700) over world-writable /tmp for helper
-  // scripts and their output, to avoid TOCTOU/symlink tampering of files we then execute/read.
+  // Return the private per-user runtime dir (mode 0700) for helper scripts and their output.
+  // We deliberately do NOT fall back to world-writable /tmp: these files are executed/read, so a
+  // predictable /tmp path is a symlink/TOCTOU vector. Fail closed instead -- callers treat an empty
+  // result as "cannot run the helper". A host without XDG_RUNTIME_DIR has no GNOME session bus
+  // either, so the Mutter helpers could not work regardless.
   static std::string apollo_helper_dir() {
     const char *xdg = std::getenv("XDG_RUNTIME_DIR");
     if (xdg && xdg[0] == '/') {
       return std::string(xdg);
     }
-    return std::string("/tmp");
+    return std::string();
   }
 
   static std::string detect_mutter_primary_connector() {
-    const std::string script_path = apollo_helper_dir() + "/apollo-mutter-primary.py";
-    const std::string out_path = apollo_helper_dir() + "/apollo-mutter-primary.out";
+    const std::string helper_dir = apollo_helper_dir();
+    if (helper_dir.empty()) {
+      BOOST_LOG(warning) << "[VDISPLAY] XDG_RUNTIME_DIR unavailable; skipping Mutter primary detection.";
+      return std::string();
+    }
+    const std::string script_path = helper_dir + "/apollo-mutter-primary.py";
+    const std::string out_path = helper_dir + "/apollo-mutter-primary.out";
     std::ofstream script(script_path, std::ios::trunc);
     if (!script) {
       return std::string();
@@ -2601,7 +2609,12 @@ for _attempt in range(8):
       BOOST_LOG(warning) << "[VDISPLAY] Refusing unsafe primary connector override.";
       return false;
     }
-    const std::string script_path = apollo_helper_dir() + "/apollo-mutter-displayconfig.py";
+    const std::string helper_dir = apollo_helper_dir();
+    if (helper_dir.empty()) {
+      BOOST_LOG(warning) << "[VDISPLAY] XDG_RUNTIME_DIR unavailable; cannot run Mutter display helper.";
+      return false;
+    }
+    const std::string script_path = helper_dir + "/apollo-mutter-displayconfig.py";
 
     std::ofstream script(script_path, std::ios::trunc);
     if (!script) {
