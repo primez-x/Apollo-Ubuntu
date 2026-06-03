@@ -515,7 +515,7 @@ namespace config {
     },  // display_device
 
     0,  // max_bitrate
-    0,  // minimum_fps_target (0 = framerate)
+    0,  // minimum_fps_target (0 = half the requested framerate)
 
     "1920x1080x60",  // fallback_mode
     true, // isolated Display

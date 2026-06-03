@@ -326,13 +326,31 @@ namespace platf {
           sd = other.sd;
           timestamp = other.timestamp;
           valid = other.valid;
+          pw_buf = other.pw_buf;
           std::fill(std::begin(other.sd.fds), std::end(other.sd.fds), -1);
           other.valid = false;
+          other.pw_buf = nullptr;
         }
 
         egl::surface_descriptor_t sd {};
         std::chrono::steady_clock::time_point timestamp {};
         bool valid {};
+        // The PipeWire buffer this frame was captured from. Ownership of the
+        // buffer (i.e. responsibility to pw_stream_queue_buffer it) travels with
+        // the frame; it is NOT released by reset()/move_to(). The consumer must
+        // re-queue it only once the encoder has finished importing the frame.
+        struct pw_buffer *pw_buf {};
+      };
+
+      // DMA-BUF capture image that remembers which PipeWire buffer backs it. The
+      // buffer stays checked out of PipeWire's pool until this image is handed
+      // back to the free pool (use_count()==1), which only happens after the
+      // encoder has imported the frame in convert(). That keeps the compositor
+      // from rendering new content into a buffer we are still encoding from --
+      // the cause of the "last few frames loop" artifact on static screens.
+      class pw_dmabuf_img_t: public egl::img_descriptor_t {
+      public:
+        struct pw_buffer *pw_buf {};
       };
 
 	    class pipewire_img_t: public img_t {
@@ -494,6 +512,15 @@ namespace platf {
 	            return capture_e::interrupted;
 	          }
 
+	          // The pool only returns an image once the encoder is done with its prior
+	          // frame (use_count()==1). Any PipeWire buffer that image still holds from
+	          // an earlier capture is therefore safe to return to the pool now.
+	          auto *dmabuf_img = static_cast<pw_dmabuf_img_t *>(img.get());
+	          if (dmabuf_img->pw_buf) {
+	            requeue_buffer_from_consumer(dmabuf_img->pw_buf);
+	            dmabuf_img->pw_buf = nullptr;
+	          }
+
 	          bool captured = false;
 	          double wait_ms = 0;
 	          {
@@ -524,7 +551,12 @@ namespace platf {
 	              descriptor->row_pitch = width * 4;
 	              descriptor->sequence = latest_generation;
 	              descriptor->serial = std::numeric_limits<decltype(descriptor->serial)>::max();
+	              // This image takes ownership of the buffer; it is re-queued only when
+	              // the image is pulled again, i.e. after the encoder has imported it.
+	              auto *consumed_buf = latest_dmabuf.pw_buf;
+	              latest_dmabuf.pw_buf = nullptr;
 	              latest_dmabuf.move_to(*descriptor);
+	              dmabuf_img->pw_buf = consumed_buf;
 	              consumed_generation = latest_generation;
 	              captured = true;
 	            }
@@ -542,7 +574,7 @@ namespace platf {
 
 	      std::shared_ptr<img_t> alloc_img() override {
 	        if (active_capture_mode == pipewire_capture_mode_e::DMABUF) {
-	          auto img = std::make_shared<egl::img_descriptor_t>();
+	          auto img = std::make_shared<pw_dmabuf_img_t>();
 	          img->width = width;
 	          img->height = height;
 	          img->pixel_pitch = 4;
@@ -725,11 +757,15 @@ namespace platf {
         std::array<const spa_pod *, 2> params {};
         std::uint32_t n_params = 0;
 
+        // Minimal 2-buffer pool (PipeWire's floor). A larger pool lets Mutter's ScreenCast
+        // re-deliver a longer run of stale buffers when rendering is idle; 2 bounds any residual
+        // stale window to a single frame. Empty re-deliveries are dropped in on_stream_process
+        // (chunk->size == 0), which is the primary fix; this small pool is the backstop.
         params[n_params++] = static_cast<const spa_pod *>(spa_pod_builder_add_object(
             &builder,
             SPA_TYPE_OBJECT_ParamBuffers,
             SPA_PARAM_Buffers,
-            SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(4, 2, 8),
+            SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(2, 2, 2),
             SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1),
             SPA_PARAM_BUFFERS_size, SPA_POD_Int(size),
             SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride),
@@ -742,7 +778,6 @@ namespace platf {
           SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header),
           SPA_PARAM_META_size, SPA_POD_Int(sizeof(struct spa_meta_header))
         ));
-
         if (pw_stream_update_params(stream, params.data(), n_params) < 0) {
           BOOST_LOG(warning) << "Unable to update PipeWire buffer data type to "
                              << (use_dmabuf ? "DMA-BUF" : "mapped memory") << '.';
@@ -914,6 +949,15 @@ namespace platf {
 
 	        const auto &data0 = spa_buffer->datas[0];
 	        const auto *chunk = data0.chunk;
+	        // Mutter re-delivers stale pool buffers with chunk->size == 0 (no new pixel data) when
+	        // nothing was rendered this frame -- tapping Ctrl/Shift, typing pauses, idle, cursor
+	        // stops. The buffer still holds an OLD frame, so encoding it shows past content (the
+	        // "revert to old frames / doesn't paint my keystrokes" glitch). Drop it and hold the
+	        // last real frame. Applies to both mapped and DMA-BUF capture.
+	        if (chunk && chunk->size == 0) {
+	          pw_stream_queue_buffer(self->stream, buffer);
+	          return;
+	        }
 	        if (data0.type == SPA_DATA_DmaBuf && self->active_capture_mode == pipewire_capture_mode_e::DMABUF) {
 	          const auto import_start = std::chrono::steady_clock::now();
 	          auto frame = self->make_dmabuf_frame(spa_buffer);
@@ -930,8 +974,16 @@ namespace platf {
 	            return;
 	          }
 
+	          frame->pw_buf = buffer;
 	          {
 	            std::lock_guard lock(self->frame_mutex);
+	            // A previously produced frame was never consumed by the capture thread
+	            // (it is being dropped). Recycle its buffer here on the PipeWire loop
+	            // thread before we overwrite the slot, otherwise it would leak.
+	            if (self->latest_dmabuf.valid && self->latest_dmabuf.pw_buf) {
+	              pw_stream_queue_buffer(self->stream, self->latest_dmabuf.pw_buf);
+	              self->latest_dmabuf.pw_buf = nullptr;
+	            }
 	            self->latest_dmabuf = std::move(*frame);
 	            self->latest_timestamp = self->latest_dmabuf.timestamp;
 	            ++self->latest_generation;
@@ -944,7 +996,10 @@ namespace platf {
 	            chunk->stride
 	          );
 
-	          pw_stream_queue_buffer(self->stream, buffer);
+	          // NOTE: do NOT re-queue the buffer here. It stays checked out of the
+	          // PipeWire pool until the encoder has finished importing this frame, so
+	          // the compositor cannot render new content into a buffer we still read
+	          // from. capture_dmabuf re-queues it once the image returns to the pool.
 	          return;
 	        }
 
@@ -1404,6 +1459,22 @@ namespace platf {
 	        BOOST_LOG(info) << "GNOME PipeWire capture path selected: "sv << pipewire_capture_mode_name(active_capture_mode);
 	        return true;
 		      }
+
+	      // Return a PipeWire buffer to the pool from the capture (consumer) thread.
+	      // pw_stream_queue_buffer must run under the stream loop lock when called
+	      // off the PipeWire thread. We never hold frame_mutex here, so there is no
+	      // lock-order inversion with on_stream_process (which takes frame_mutex while
+	      // the loop lock is held).
+	      void requeue_buffer_from_consumer(struct pw_buffer *buf) {
+	        if (!buf || !loop || !stream) {
+	          return;
+	        }
+	        pw_thread_loop_lock(loop);
+	        if (stream) {
+	          pw_stream_queue_buffer(stream, buf);
+	        }
+	        pw_thread_loop_unlock(loop);
+	      }
 
 	      void trigger_pipewire_process() {
 	        if (!gamescope_pipewire_capture || !stream) {

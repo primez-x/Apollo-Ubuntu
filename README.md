@@ -236,6 +236,17 @@ never interrupted; the fallback happens once per session.
 
 When DMA-BUF diagnostics are enabled in logs, `data_type=3` means PipeWire delivered DMA-BUF. `data_type=1` or `data_type=2` means Apollo is on a mapped CPU/shared-memory fallback.
 
+Frame pacing and stability:
+
+- On static content the encoder coasts down to **half the client's requested frame rate** (a 120 fps
+  request idles around 60 fps) instead of padding the stream with duplicate frames. This is the
+  `minimum_fps_target` default (`0` = half the requested rate); set an explicit value to override.
+- Mutter's ScreenCast re-delivers empty buffers (`chunk->size == 0`, no new pixel data) on
+  zero-damage events — modifier keypresses, typing pauses, idle, a stopped cursor. Apollo drops
+  these and holds the last real frame, so the image never reverts to older frames or shows a partial
+  paint. The capture also requests a minimal 2-buffer pool to keep any residual stale window to a
+  single frame.
+
 For temporary diagnostics only, the environment variable below overrides the config value:
 
 ```bash

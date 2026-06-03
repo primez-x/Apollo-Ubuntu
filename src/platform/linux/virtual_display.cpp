@@ -869,6 +869,7 @@ namespace VDISPLAY {
     bool active;
     std::string saved_primary_connector;  // physical primary to restore on Mutter/PipeWire teardown
     bool suppress_desktop_layout = false;  // probe display: create the head only, never relocate desktop / DPMS-off physical
+    bool layout_isolated = false;          // true once Meta-0 is primary + physical DPMS-off; skip redundant re-isolate on resume
     bool gamescope_cursor_overlay = true;
     std::shared_ptr<gamescope_session_t> gamescope;
     gamescope_cursor_state_t gamescope_cursor;
@@ -1434,7 +1435,7 @@ for _attempt in range(8):
 
     GVariantBuilder props;
     g_variant_builder_init(&props, G_VARIANT_TYPE("a{sv}"));
-    g_variant_builder_add(&props, "{sv}", "cursor-mode", g_variant_new_uint32(1));
+    g_variant_builder_add(&props, "{sv}", "cursor-mode", g_variant_new_uint32(1));  // 1=embedded (composited into frame)
     g_variant_builder_add(&props, "{sv}", "is-recording", g_variant_new_boolean(TRUE));
     g_variant_builder_add(&props, "{sv}", "is-platform", g_variant_new_boolean(TRUE));
     g_variant_builder_add(&props, "{sv}", "width", g_variant_new_uint32(vdinfo.width));
@@ -2333,6 +2334,7 @@ if power_action in ("off", "on"):
     uint32_t width = 0, height = 0, fps = 0;
     bool found = false;
     bool suppress = false;
+    bool already_isolated = false;
     {
       std::lock_guard<std::mutex> lock(vdisplay_mutex);
       for (const auto &[guid, vdinfo] : virtual_displays) {
@@ -2341,6 +2343,7 @@ if power_action in ("off", "on"):
           height = vdinfo.height;
           fps = vdinfo.fps;
           suppress = vdinfo.suppress_desktop_layout;
+          already_isolated = vdinfo.layout_isolated;
           found = true;
           break;
         }
@@ -2355,6 +2358,14 @@ if power_action in ("off", "on"):
       BOOST_LOG(info) << "[VDISPLAY] Skipping desktop layout for probe display " << displayName << '.';
       return true;
     }
+    if (isolate && already_isolated) {
+      // Resume/reconnect on a head that is already isolated onto Meta-0: re-running the
+      // monitor-layout reconfigure (primary swap + DPMS) churns Mutter for no benefit, and
+      // that churn is what degrades the ScreenCast/compositor over a session. Skip it.
+      BOOST_LOG(info) << "[VDISPLAY] Desktop layout already isolated for " << displayName
+                      << "; skipping redundant reconfigure.";
+      return true;
+    }
     const uint32_t refresh_hz = std::max<uint32_t>(1, fps / 1000);
     BOOST_LOG(info) << "[VDISPLAY] Applying Mutter/PipeWire desktop layout for " << displayName
                     << " (" << width << "x" << height << "@" << refresh_hz << "Hz, isolate=" << isolate << ").";
@@ -2363,6 +2374,15 @@ if power_action in ("off", "on"):
     if (!apply_mutter_display_config(width, height, refresh_hz, isolate, std::string(), false, isolate ? "off" : "none")) {
       BOOST_LOG(warning) << "[VDISPLAY] applyMutterDisplayLayout failed for " << displayName;
       return false;
+    }
+    {
+      std::lock_guard<std::mutex> lock(vdisplay_mutex);
+      for (auto &[guid, vdinfo] : virtual_displays) {
+        if (vdinfo.name == displayName && vdinfo.backend == BACKEND::MUTTER_PIPEWIRE) {
+          vdinfo.layout_isolated = isolate;
+          break;
+        }
+      }
     }
     std::this_thread::sleep_for(750ms);
     return true;
@@ -2397,7 +2417,17 @@ if power_action in ("off", "on"):
     // monitor rather than no-op'ing (which would leave the virtual head primary on teardown).
     // physical_power="on" wakes the panel we DPMS-off'd during isolate (re-adding it to the
     // layout alone may leave it in power-save on NVIDIA).
-    return apply_mutter_display_config(0, 0, 0, false, primary, /*restore_mode=*/true, /*physical_power=*/"on");
+    const bool ok = apply_mutter_display_config(0, 0, 0, false, primary, /*restore_mode=*/true, /*physical_power=*/"on");
+    if (ok) {
+      std::lock_guard<std::mutex> lock(vdisplay_mutex);
+      for (auto &[guid, vdinfo] : virtual_displays) {
+        if (vdinfo.name == displayName && vdinfo.backend == BACKEND::MUTTER_PIPEWIRE) {
+          vdinfo.layout_isolated = false;
+          break;
+        }
+      }
+    }
+    return ok;
   }
 
   bool getGamescopePipeWireNodeId(const std::string &displayName, uint32_t &node_id) {
