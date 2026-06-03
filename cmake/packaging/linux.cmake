@@ -49,12 +49,10 @@ set(CPACK_DEB_COMPONENT_INSTALL ON)
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
             ${CPACK_DEB_PLATFORM_PACKAGE_DEPENDS} \
             debianutils, \
-            evdi-dkms, \
             libcap2, \
             libcurl4, \
             libdrm2, \
             libei1, \
-            libevdi1, \
             libgbm1, \
             libglib2.0-0t64 | libglib2.0-0, \
             libevdev2, \

@@ -1044,7 +1044,6 @@ std::string get_local_ip_for_gateway() {
     if (display_name.rfind("VIRTUAL-", 0) == 0) {
       const auto backend = VDISPLAY::virtualDisplayBackend(display_name);
       if (backend == VDISPLAY::BACKEND::MUTTER_PIPEWIRE ||
-          backend == VDISPLAY::BACKEND::EVDI_PIPEWIRE ||
           backend == VDISPLAY::BACKEND::GAMESCOPE_PIPEWIRE) {
         const char *capture_override = std::getenv("APOLLO_LINUX_VIRTUAL_CAPTURE");
         if (capture_override && *capture_override && !VDISPLAY::parseLinuxVirtualCaptureBackend(capture_override)) {
@@ -1091,16 +1090,6 @@ std::string get_local_ip_for_gateway() {
         return disp;
 #else
         BOOST_LOG(error) << "PipeWire virtual display capture requested, but PipeWire support is not compiled in."sv;
-        return nullptr;
-#endif
-      }
-
-      if (backend == VDISPLAY::BACKEND::EVDI) {
-#ifdef SUNSHINE_BUILD_DRM
-        BOOST_LOG(info) << "Screencasting EVDI virtual display with KMS"sv;
-        return kms_display(hwdevice_type, display_name, config);
-#else
-        BOOST_LOG(error) << "EVDI virtual display capture requested, but KMS support is not compiled in."sv;
         return nullptr;
 #endif
       }
@@ -1191,9 +1180,6 @@ std::string get_local_ip_for_gateway() {
 #ifdef SUNSHINE_BUILD_DRM
     if (config::video.capture.empty() || config::video.capture == "kms") {
       if (verify_kms()) {
-        sources[source::KMS] = true;
-      } else if (fs::exists("/sys/devices/evdi"sv)) {
-        BOOST_LOG(info) << "EVDI is available; enabling KMS capture for virtual displays"sv;
         sources[source::KMS] = true;
       }
     }

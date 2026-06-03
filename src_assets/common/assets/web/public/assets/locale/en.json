@@ -312,7 +312,7 @@
     "isolated_virtual_display_option": "Move the Virtual Display to the bottom right-most corner of the display layout",
     "isolated_virtual_display_option_desc": "This makes the display isolated from all other display and contains mouse movements to the virtual screen. This reorganizes the displays such that the all other displays are to the left of the virtual display.",	
     "linux_virtual_display_backend": "Linux Virtual Display Backend",
-    "linux_virtual_display_backend_desc": "Select the Linux virtual display backend. Auto uses an EVDI monitor captured through GNOME Mutter ScreenCast/PipeWire. Gamescope starts an Apollo-owned headless compositor session. APOLLO_LINUX_VIRTUAL_BACKEND can override this for diagnostics.",
+    "linux_virtual_display_backend_desc": "Select the Linux virtual display backend. Auto uses the kernel-free GNOME Mutter RecordVirtual path captured through Mutter ScreenCast/PipeWire. Gamescope starts an Apollo-owned headless compositor session. APOLLO_LINUX_VIRTUAL_BACKEND can override this for diagnostics.",
     "linux_virtual_capture_backend": "Linux Virtual Capture Backend",
     "linux_virtual_capture_backend_desc": "Select the capture path used after Apollo creates a Linux virtual display. Auto uses PipeWire with the configured DMA-BUF policy; NVIDIA is an explicit experimental path.",
     "linux_pipewire_dmabuf": "PipeWire DMA-BUF Capture",

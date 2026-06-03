@@ -14,8 +14,8 @@ set(PROJECT_FQDN "io.github.primezx.ApolloUbuntu")
 
 set(PROJECT_BRIEF_DESCRIPTION "Ubuntu GameStream host")  # must be <= 35 characters
 
-set(PROJECT_LONG_DESCRIPTION "Offering low latency Ubuntu desktop streaming with GNOME Wayland virtual display \
-support, EVDI-backed virtual monitors, and PipeWire capture. AMD, Intel, and Nvidia hardware encoding are supported \
+set(PROJECT_LONG_DESCRIPTION "Offering low latency Ubuntu desktop streaming with GNOME Mutter RecordVirtual \
+virtual displays (optional Gamescope backend) and PipeWire capture. AMD, Intel, and Nvidia hardware encoding are supported \
 where the host driver stack exposes them, with software encoding available as a fallback. Pair from the local server \
 or any Moonlight-compatible client.")
 

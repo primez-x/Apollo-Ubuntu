@@ -367,11 +367,7 @@ namespace proc {
 #ifndef _WIN32
           if (mapped_display_name.empty() && VDISPLAY::isVirtualDisplay(this->display_name)) {
             const auto backend = VDISPLAY::virtualDisplayBackend(this->display_name);
-            if (backend == VDISPLAY::BACKEND::EVDI) {
-              BOOST_LOG(info) << "Using EVDI virtual display [" << this->display_name << "] for direct KMS capture.";
-            } else if (backend == VDISPLAY::BACKEND::EVDI_PIPEWIRE) {
-              BOOST_LOG(info) << "Using EVDI virtual display [" << this->display_name << "] for Mutter/PipeWire monitor capture.";
-            } else if (backend == VDISPLAY::BACKEND::MUTTER_PIPEWIRE) {
+            if (backend == VDISPLAY::BACKEND::MUTTER_PIPEWIRE) {
               BOOST_LOG(info) << "Using Mutter/PipeWire virtual display [" << this->display_name << "] for direct GNOME capture.";
             } else if (backend == VDISPLAY::BACKEND::GAMESCOPE_PIPEWIRE) {
               BOOST_LOG(info) << "Using Gamescope/PipeWire virtual display [" << this->display_name << "] for Apollo-owned remote session capture.";

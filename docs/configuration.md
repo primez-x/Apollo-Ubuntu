@@ -1046,10 +1046,9 @@ editing the `conf` file in a text editor. Use the examples as reference.
     <tr>
         <td>Description</td>
         <td colspan="2">
-            Select the Linux virtual display backend. The default uses EVDI to create
-            a real GNOME/Wayland monitor, then captures that monitor through Mutter
-            ScreenCast/PipeWire. This avoids direct CPU-side EVDI/KMS capture on
-            GNOME while still giving the compositor a real virtual monitor. The
+            Select the Linux virtual display backend. The default (`auto`) uses the
+            kernel-free GNOME Mutter RecordVirtual path: Mutter creates a virtual
+            monitor and Apollo captures it through Mutter ScreenCast/PipeWire. The
             `gamescope` backend starts an Apollo-owned headless Gamescope compositor
             and captures its PipeWire node.
             Apps can override this per session with the
@@ -1071,9 +1070,9 @@ editing the `conf` file in a text editor. Use the examples as reference.
             @endcode</td>
     </tr>
     <tr>
-        <td rowspan="4">Choices</td>
+        <td rowspan="3">Choices</td>
         <td>auto</td>
-        <td>Use the EVDI monitor/PipeWire hybrid backend.</td>
+        <td>Use the GNOME Mutter RecordVirtual/PipeWire backend.</td>
     </tr>
     <tr>
         <td>gamescope</td>
@@ -1081,11 +1080,7 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
     <tr>
         <td>mutter</td>
-        <td>Use GNOME Mutter RecordVirtual/PipeWire without creating an EVDI monitor.</td>
-    </tr>
-    <tr>
-        <td>evdi</td>
-        <td>Use direct EVDI/KMS capture. This is mainly retained for diagnostics.</td>
+        <td>Use GNOME Mutter RecordVirtual/PipeWire.</td>
     </tr>
 </table>
 

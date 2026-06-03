@@ -140,7 +140,7 @@ jobs:
 
           body="$(cat upstream-compatibility-report.md)
 
-          Automated check passed the Ubuntu build and test gate. Manual GNOME Wayland, EVDI, PipeWire, and Moonlight validation is still required before merge."
+          Automated check passed the Ubuntu build and test gate. Manual GNOME Wayland, PipeWire, and Moonlight validation is still required before merge."
 
           existing_pr="$(gh pr list --head "${SYNC_BRANCH}" --base "${BASE_BRANCH}" --json number --jq '.[0].number // empty')"
           if [ -n "${existing_pr}" ]; then

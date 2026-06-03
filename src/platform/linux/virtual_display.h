@@ -23,10 +23,8 @@ namespace VDISPLAY {
    */
   enum class BACKEND {
     UNKNOWN,
-    EVDI_PIPEWIRE,
     MUTTER_PIPEWIRE,
-    GAMESCOPE_PIPEWIRE,
-    EVDI
+    GAMESCOPE_PIPEWIRE
   };
 
   struct gamescope_launch_environment_t {
@@ -329,51 +327,5 @@ namespace VDISPLAY {
   bool notifyGamescopePointerAxis(double dx, double dy);
 
   bool notifyGamescopeKeyboardKey(uint16_t modcode, bool release);
-
-  /**
-   * @brief Check if a display is an EVDI virtual display.
-   * @param displayName The name of the display to check.
-   * @return true if the display is an EVDI virtual display, false otherwise.
-   */
-  bool isEvdiDisplay(const std::string &displayName);
-
-  /**
-   * @brief Get the DRM card index for an EVDI display.
-   * @param displayName The name of the EVDI display.
-   * @return The card index, or -1 if not found or not an EVDI display.
-   */
-  int getEvdiCardIndex(const std::string &displayName);
-
-  /**
-   * @brief Copy the latest EVDI painter frame into a caller-owned buffer.
-   * @param displayName The EVDI display name.
-   * @param dst Destination buffer.
-   * @param width Expected frame width.
-   * @param height Expected frame height.
-   * @param dst_stride Destination row pitch in bytes.
-   * @param timeout Maximum time to wait for a frame newer than last_generation.
-   * @param last_generation Last generation consumed by the caller; updated on success.
-   * @param frame_timestamp Timestamp for the copied frame; updated on success.
-   * @return true if a new frame was copied, false otherwise.
-   */
-  bool copyLatestEvdiFrame(
-    const std::string &displayName,
-    std::uint8_t *dst,
-    int width,
-    int height,
-    int dst_stride,
-    std::chrono::milliseconds timeout,
-    std::uint64_t &last_generation,
-    std::chrono::steady_clock::time_point &frame_timestamp,
-    bool require_new_frame = true
-  );
-
-  /**
-   * @brief Check whether the EVDI painter is blocked in a grab operation.
-   * @param displayName The EVDI display name.
-   * @param minimum_duration Minimum grab age to report as busy.
-   * @return true if the current EVDI grab has exceeded minimum_duration.
-   */
-  bool isEvdiGrabBusy(const std::string &displayName, std::chrono::milliseconds minimum_duration);
 
 }  // namespace VDISPLAY

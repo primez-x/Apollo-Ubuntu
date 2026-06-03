@@ -78,7 +78,6 @@ license = GPL-3.0-only
 install = .INSTALL
 depend = avahi
 depend = curl
-depend = evdi
 depend = libayatana-appindicator
 depend = libcap
 depend = libdrm
@@ -116,23 +115,11 @@ do_udev_reload() {
   modprobe uhid || true
 }
 
-load_evdi() {
-  # Carregar módulo EVDI para virtual display
-  modprobe evdi || true
-  
-  # Adicionar ao carregamento automático no boot
-  if [ ! -f /etc/modules-load.d/evdi.conf ]; then
-    echo "evdi" > /etc/modules-load.d/evdi.conf
-  fi
-}
-
 post_install() {
   do_setcap
   do_udev_reload
-  load_evdi
   echo ""
   echo "==> Apollo instalado com sucesso!"
-  echo "==> Virtual display (EVDI) configurado automaticamente."
   echo "==> Execute 'apollo' para iniciar o servidor."
   echo ""
 }
@@ -140,7 +127,6 @@ post_install() {
 post_upgrade() {
   do_setcap
   do_udev_reload
-  load_evdi
 }
 EOF
 
@@ -155,8 +141,5 @@ echo "Para instalar:"
 echo "  sudo pacman -U ${PKG_NAME}"
 echo ""
 echo "O pacote irá automaticamente:"
-echo "  - Instalar EVDI como dependência"
 echo "  - Configurar capabilities para KMS capture"
-echo "  - Carregar módulo EVDI"
-echo "  - Configurar EVDI para carregar no boot"
 echo ""

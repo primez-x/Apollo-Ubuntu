@@ -188,7 +188,7 @@ jobs:
           cat > release-notes.md <<EOF
           Apollo Ubuntu ${version}
 
-          Standalone Ubuntu-focused Apollo build with the hybrid EVDI + Mutter/PipeWire virtual display backend.
+          Standalone Ubuntu-focused Apollo build with the kernel-free GNOME Mutter RecordVirtual/PipeWire virtual display backend.
 
           Assets:
           - ${deb_name}: recommended Ubuntu 24.04+ install package.
@@ -196,8 +196,8 @@ jobs:
           - SHA256SUMS: checksums for release assets.
 
           Notes:
-          - The deb package is the recommended install path because EVDI is a host kernel module.
-          - Validate GNOME Wayland, PipeWire capture, EVDI, and Moonlight streaming on the target host.
+          - The deb package is the recommended install path.
+          - Validate GNOME Wayland, PipeWire capture, and Moonlight streaming on the target host.
           EOF
 
       - name: Create GitHub release

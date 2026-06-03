@@ -51,18 +51,6 @@ using namespace std::literals;
 
 namespace platf {
   namespace {
-	    std::string upper_copy(std::string value) {
-	      std::transform(std::begin(value), std::end(value), std::begin(value), [](unsigned char c) {
-	        return static_cast<char>(std::toupper(c));
-	      });
-	      return value;
-	    }
-
-	    bool is_apollo_monitor_spec(const std::string &connector, const std::string &vendor, const std::string &product, const std::string &display_name) {
-	      auto haystack = upper_copy(connector + " " + vendor + " " + product + " " + display_name);
-	      return upper_copy(vendor) == "APL" || haystack.find("APOLLO") != std::string::npos || haystack.find("VDISP") != std::string::npos;
-	    }
-
 	    bool mutter_screencast_available() {
       GError *raw_error = nullptr;
       auto bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &raw_error);
@@ -255,7 +243,6 @@ namespace platf {
         std::uint32_t virtual_height {};
         std::uint32_t virtual_fps {};
         if ((virtual_backend == VDISPLAY::BACKEND::MUTTER_PIPEWIRE ||
-             virtual_backend == VDISPLAY::BACKEND::EVDI_PIPEWIRE ||
              virtual_backend == VDISPLAY::BACKEND::GAMESCOPE_PIPEWIRE) &&
             VDISPLAY::getVirtualDisplayMode(display_name, virtual_width, virtual_height, virtual_fps)) {
           width = static_cast<int>(virtual_width);
@@ -854,35 +841,21 @@ namespace platf {
 	        g_variant_builder_add(&props, "{sv}", "height", g_variant_new_uint32(height));
 	        g_variant_builder_add(&props, "{sv}", "framerate", g_variant_new_uint32(framerate));
 
-	        const bool record_existing_monitor = VDISPLAY::isEvdiDisplay(display_name);
-	        std::string connector_name;
-	        if (record_existing_monitor) {
-	          connector_name = find_apollo_monitor_connector();
-	          if (connector_name.empty()) {
-	            BOOST_LOG(error) << "Unable to find Apollo virtual monitor in Mutter DisplayConfig for GNOME PipeWire RecordMonitor."sv;
-	            return false;
-	          }
-
-	          BOOST_LOG(info) << "GNOME ScreenCast will RecordMonitor connector ["sv << connector_name << "] for ["sv << display_name << ']';
-	        }
-
 	        raw_error = nullptr;
 	        auto stream_result = mutter_dbus::call_sync(
 	          bus,
 	          mutter_dbus::SCREENCAST_SERVICE,
 	          session_path.c_str(),
 	          "org.gnome.Mutter.ScreenCast.Session",
-	          record_existing_monitor ? "RecordMonitor" : "RecordVirtual",
-	          record_existing_monitor ? g_variant_new("(sa{sv})", connector_name.c_str(), &props) : g_variant_new("(a{sv})", &props),
+	          "RecordVirtual",
+	          g_variant_new("(a{sv})", &props),
 	          G_VARIANT_TYPE("(o)"),
 	          mutter_dbus::STREAM_CALL_TIMEOUT_MS,
           &raw_error
         );
 	        if (!stream_result) {
 	          mutter_dbus::gerror_ptr dbus_error(raw_error);
-	          BOOST_LOG(error) << "Unable to create GNOME "sv
-	                           << (record_existing_monitor ? "monitor"sv : "virtual"sv)
-	                           << " ScreenCast stream: "sv
+	          BOOST_LOG(error) << "Unable to create GNOME virtual ScreenCast stream: "sv
 	                           << (dbus_error ? dbus_error->message : "unknown");
 	          return false;
 	        }
@@ -938,141 +911,6 @@ namespace platf {
 
         BOOST_LOG(info) << "GNOME ScreenCast PipeWire node " << node_id << " created.";
 	        return true;
-	      }
-
-	      std::string find_apollo_monitor_connector() {
-	        const auto deadline = std::chrono::steady_clock::now() + 3s;
-	        while (std::chrono::steady_clock::now() < deadline) {
-	          auto connector = find_apollo_monitor_connector_once();
-	          if (!connector.empty()) {
-	            return connector;
-	          }
-
-	          std::this_thread::sleep_for(100ms);
-	        }
-
-	        return {};
-	      }
-
-	      std::string find_apollo_monitor_connector_once() {
-	        GError *raw_error = nullptr;
-	        auto state = mutter_dbus::call_sync(
-	          bus,
-	          mutter_dbus::DISPLAY_CONFIG_SERVICE,
-	          mutter_dbus::DISPLAY_CONFIG_PATH,
-	          "org.gnome.Mutter.DisplayConfig",
-	          "GetCurrentState",
-	          nullptr,
-	          nullptr,
-	          2000,
-	          &raw_error
-	        );
-
-	        if (!state) {
-	          mutter_dbus::gerror_ptr dbus_error(raw_error);
-	          BOOST_LOG(debug) << "Unable to query Mutter DisplayConfig for PipeWire monitor capture: "sv
-	                           << (dbus_error ? dbus_error->message : "unknown");
-	          return {};
-	        }
-
-	        auto monitors = g_variant_get_child_value(state, 1);
-	        if (!monitors) {
-	          g_variant_unref(state);
-	          return {};
-	        }
-
-	        std::string best_exact_connector;
-	        std::string best_apollo_connector;
-	        const auto monitor_count = g_variant_n_children(monitors);
-	        for (gsize index = 0; index < monitor_count; ++index) {
-	          auto monitor = g_variant_get_child_value(monitors, index);
-	          if (!monitor) {
-	            continue;
-	          }
-
-	          auto spec = g_variant_get_child_value(monitor, 0);
-	          auto properties = g_variant_get_child_value(monitor, 2);
-	          if (!spec || !properties) {
-	            if (spec) {
-	              g_variant_unref(spec);
-	            }
-	            if (properties) {
-	              g_variant_unref(properties);
-	            }
-	            g_variant_unref(monitor);
-	            continue;
-	          }
-
-	          auto connector = mutter_dbus::child_string(spec, 0).value_or(std::string {});
-	          auto vendor = mutter_dbus::child_string(spec, 1).value_or(std::string {});
-	          auto product = mutter_dbus::child_string(spec, 2).value_or(std::string {});
-	          auto mutter_display_name = mutter_dbus::string_property(properties, "display-name");
-
-	          if (is_apollo_monitor_spec(connector, vendor, product, mutter_display_name)) {
-	            BOOST_LOG(info) << "Found Apollo Mutter monitor candidate: connector="sv << connector
-	                            << " vendor="sv << vendor
-	                            << " product="sv << product
-	                            << " display-name="sv << mutter_display_name;
-
-	            if (monitor_has_requested_mode(monitor)) {
-	              best_exact_connector = connector;
-	            } else if (best_apollo_connector.empty()) {
-	              best_apollo_connector = connector;
-	            }
-	          }
-
-	          g_variant_unref(properties);
-	          g_variant_unref(spec);
-	          g_variant_unref(monitor);
-	        }
-
-	        g_variant_unref(monitors);
-	        g_variant_unref(state);
-
-	        if (!best_exact_connector.empty()) {
-	          return best_exact_connector;
-	        }
-
-	        return best_apollo_connector;
-	      }
-
-	      bool monitor_has_requested_mode(GVariant *monitor) {
-	        auto modes = g_variant_get_child_value(monitor, 1);
-	        if (!modes) {
-	          return false;
-	        }
-
-	        bool found = false;
-	        const auto mode_count = g_variant_n_children(modes);
-	        for (gsize index = 0; index < mode_count; ++index) {
-	          auto mode = g_variant_get_child_value(modes, index);
-	          if (!mode) {
-	            continue;
-	          }
-
-	          auto width_value = g_variant_get_child_value(mode, 1);
-	          auto height_value = g_variant_get_child_value(mode, 2);
-	          if (width_value && height_value) {
-	            auto mode_width = mutter_dbus::int64_from_variant(width_value);
-	            auto mode_height = mutter_dbus::int64_from_variant(height_value);
-	            found = mode_width == width && mode_height == height;
-	          }
-
-	          if (width_value) {
-	            g_variant_unref(width_value);
-	          }
-	          if (height_value) {
-	            g_variant_unref(height_value);
-	          }
-	          g_variant_unref(mode);
-
-	          if (found) {
-	            break;
-	          }
-	        }
-
-	        g_variant_unref(modes);
-	        return found;
 	      }
 
 	      bool call_no_args(const std::string &path, const char *interface, const char *method) {

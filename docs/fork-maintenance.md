@@ -1,6 +1,6 @@
 # Apollo Ubuntu Fork Maintenance
 
-This repository is maintained as the Ubuntu/Linux release line for Apollo. It is not expected to merge cleanly back into ClassicOldSong/Apollo because this fork carries Linux virtual display, EVDI, PipeWire, and Ubuntu packaging behavior that is outside the parent repository's primary Windows release surface.
+This repository is maintained as the Ubuntu/Linux release line for Apollo. It is not expected to merge cleanly back into ClassicOldSong/Apollo because this fork carries Linux virtual display, PipeWire, and Ubuntu packaging behavior that is outside the parent repository's primary Windows release surface.
 
 ## Branch Model
 
@@ -26,7 +26,7 @@ No parent update should be merged until these Linux gates are checked:
 - Ubuntu build completes.
 - Unit tests pass where available.
 - `sunshine.service` starts under a GNOME Wayland user session.
-- EVDI module loads and an Apollo virtual monitor appears.
+- A Mutter RecordVirtual virtual monitor appears.
 - Mutter ScreenCast/PipeWire capture works.
 - Moonlight/Artemis can connect and stream with usable input and frame pacing.
 
@@ -61,7 +61,6 @@ cpack -G DEB --config build/CPackConfig.cmake
 
 Then install the generated `.deb` on a GNOME Wayland Ubuntu host and verify:
 
-- `evdi` is loaded.
 - `systemctl --user status sunshine.service` is active.
 - `curl http://localhost:47989/serverinfo` returns server info.
 - A Moonlight client can start and stop a virtual display session.
@@ -69,4 +68,4 @@ Then install the generated `.deb` on a GNOME Wayland Ubuntu host and verify:
 
 ## Flatpak Notes
 
-Flatpak is not the primary release path yet because EVDI is a host kernel module. The Flatpak can be useful once the host has EVDI installed, but Ubuntu `.deb` releases are the supported path for the virtual display backend.
+Flatpak is not the primary release path yet. Ubuntu `.deb` releases are the supported path for the virtual display backend.

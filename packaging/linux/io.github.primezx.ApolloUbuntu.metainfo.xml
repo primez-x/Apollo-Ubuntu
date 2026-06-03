@@ -28,10 +28,6 @@
     <p>
       <code>flatpak run --command=additional-install.sh @PROJECT_FQDN@</code>
     </p>
-    <p>NOTE: EVDI must be installed on the host for virtual display support.</p>
-    <p>
-      <code>sudo apt install evdi-dkms libevdi1</code>
-    </p>
     <p>NOTE: The web UI uses a self-signed certificate. The web browser will report it as not secure.</p>
   </description>
 

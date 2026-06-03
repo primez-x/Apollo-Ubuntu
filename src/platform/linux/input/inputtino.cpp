@@ -108,7 +108,7 @@ namespace platf {
 
     // Mutter RecordVirtual path: translate the Moonlight/VK code to an evdev keycode and
     // inject via the RemoteDesktop session. notifyMutterKeyboardKeycode returns false unless
-    // the active backend is MUTTER_PIPEWIRE, so EVDI/uinput still works via the fallback below.
+    // the active backend is MUTTER_PIPEWIRE, so the uinput fallback below still works otherwise.
     auto mapping = inputtino::keyboard::key_mappings.find((short) modcode);
     if (mapping != inputtino::keyboard::key_mappings.end() && mapping->second.linux_code != inputtino::keyboard::UNKNOWN) {
       if (VDISPLAY::notifyMutterKeyboardKeycode((uint32_t) mapping->second.linux_code, release)) {

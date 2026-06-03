@@ -13,7 +13,6 @@ install=apollo.install
 depends=(
   'avahi'
   'curl'
-  'evdi'
   'libayatana-appindicator'
   'libcap'
   'libdrm'

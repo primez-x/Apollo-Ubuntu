@@ -9,42 +9,43 @@
 #include <src/platform/linux/virtual_display.h>
 
 TEST(LinuxVirtualDisplayBackendTest, ParsesSupportedBackendAliases) {
-  EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("auto"), VDISPLAY::BACKEND::EVDI_PIPEWIRE);
-  EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("hybrid"), VDISPLAY::BACKEND::EVDI_PIPEWIRE);
-  EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("evdi-pipewire"), VDISPLAY::BACKEND::EVDI_PIPEWIRE);
+  EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("auto"), VDISPLAY::BACKEND::MUTTER_PIPEWIRE);
+  EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("hybrid"), VDISPLAY::BACKEND::MUTTER_PIPEWIRE);
   EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("mutter"), VDISPLAY::BACKEND::MUTTER_PIPEWIRE);
+  EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("mutter-pipewire"), VDISPLAY::BACKEND::MUTTER_PIPEWIRE);
   EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("pipewire"), VDISPLAY::BACKEND::MUTTER_PIPEWIRE);
   EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("gamescope"), VDISPLAY::BACKEND::GAMESCOPE_PIPEWIRE);
   EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("gamescope-pipewire"), VDISPLAY::BACKEND::GAMESCOPE_PIPEWIRE);
   EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("remote-session"), VDISPLAY::BACKEND::GAMESCOPE_PIPEWIRE);
-  EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("evdi"), VDISPLAY::BACKEND::EVDI);
-  EXPECT_EQ(VDISPLAY::parseLinuxVirtualDisplayBackend("evdi-kms"), VDISPLAY::BACKEND::EVDI);
 }
 
 TEST(LinuxVirtualDisplayBackendTest, RejectsUnsupportedBackendNames) {
   EXPECT_FALSE(VDISPLAY::parseLinuxVirtualDisplayBackend(""));
   EXPECT_FALSE(VDISPLAY::parseLinuxVirtualDisplayBackend("physical"));
   EXPECT_FALSE(VDISPLAY::parseLinuxVirtualDisplayBackend("kms"));
+  EXPECT_FALSE(VDISPLAY::parseLinuxVirtualDisplayBackend("evdi"));
+  EXPECT_FALSE(VDISPLAY::parseLinuxVirtualDisplayBackend("evdi-kms"));
+  EXPECT_FALSE(VDISPLAY::parseLinuxVirtualDisplayBackend("evdi-pipewire"));
 }
 
 TEST(LinuxVirtualDisplayBackendTest, EnvironmentOverrideWinsWhenValid) {
   EXPECT_EQ(
-    VDISPLAY::resolveLinuxVirtualDisplayBackend("evdi", "mutter"),
+    VDISPLAY::resolveLinuxVirtualDisplayBackend("gamescope", "mutter"),
     VDISPLAY::BACKEND::MUTTER_PIPEWIRE
   );
 }
 
 TEST(LinuxVirtualDisplayBackendTest, InvalidEnvironmentOverrideFallsBackToConfig) {
   EXPECT_EQ(
-    VDISPLAY::resolveLinuxVirtualDisplayBackend("evdi", "unknown"),
-    VDISPLAY::BACKEND::EVDI
+    VDISPLAY::resolveLinuxVirtualDisplayBackend("gamescope", "unknown"),
+    VDISPLAY::BACKEND::GAMESCOPE_PIPEWIRE
   );
 }
 
-TEST(LinuxVirtualDisplayBackendTest, InvalidConfigFallsBackToHybridDefault) {
+TEST(LinuxVirtualDisplayBackendTest, InvalidConfigFallsBackToMutterDefault) {
   EXPECT_EQ(
     VDISPLAY::resolveLinuxVirtualDisplayBackend("unknown", nullptr),
-    VDISPLAY::BACKEND::EVDI_PIPEWIRE
+    VDISPLAY::BACKEND::MUTTER_PIPEWIRE
   );
 }
 

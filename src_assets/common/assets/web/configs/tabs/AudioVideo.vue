@@ -124,7 +124,6 @@ const validateFallbackMode = (event) => {
         <option value="auto">auto</option>
         <option value="gamescope">gamescope</option>
         <option value="mutter">mutter</option>
-        <option value="evdi">evdi</option>
       </select>
       <div class="form-text">{{ $t('config.linux_virtual_display_backend_desc') }}</div>
     </div>

@@ -280,11 +280,6 @@ function add_debian_deps() {
 function add_ubuntu_deps() {
   add_test_ppa
   add_debian_based_deps
-  dependencies+=(
-    "evdi-dkms"  # Ubuntu virtual display kernel module
-    "libevdi-dev"  # EVDI userspace library for runtime loading
-    "libevdi1"
-  )
   if [ "$version" == "26.04" ]; then
     dependencies+=(
       "libayatana-appindicator3-dev"

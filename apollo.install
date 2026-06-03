@@ -10,26 +10,14 @@ do_udev_reload() {
     modprobe uhid || true
 }
 
-load_evdi() {
-    # Carregar módulo EVDI para virtual display
-    modprobe evdi || true
-    
-    # Adicionar ao carregamento automático no boot
-    if [ ! -f /etc/modules-load.d/evdi.conf ]; then
-        echo "evdi" > /etc/modules-load.d/evdi.conf
-    fi
-}
-
 post_install() {
     do_setcap
     do_udev_reload
-    load_evdi
-    
+
     echo ""
     echo "╔══════════════════════════════════════════════════════════╗"
     echo "║          Apollo instalado com sucesso!                   ║"
     echo "╠══════════════════════════════════════════════════════════╣"
-    echo "║  • Virtual display (EVDI) configurado automaticamente    ║"
     echo "║  • Capabilities para KMS capture configuradas            ║"
     echo "║                                                          ║"
     echo "║  Execute 'apollo' para iniciar o servidor                ║"
@@ -41,16 +29,8 @@ post_install() {
 post_upgrade() {
     do_setcap
     do_udev_reload
-    load_evdi
-    
+
     echo ""
     echo "==> Apollo atualizado com sucesso!"
     echo ""
-}
-
-pre_remove() {
-    # Remover configuração de autoload do evdi se foi criada por nós
-    if [ -f /etc/modules-load.d/evdi.conf ]; then
-        rm -f /etc/modules-load.d/evdi.conf
-    fi
 }
