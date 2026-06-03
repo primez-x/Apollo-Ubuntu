@@ -868,6 +868,7 @@ namespace VDISPLAY {
     int drm_fd;            // DRM fd for card
     bool active;
     std::string saved_primary_connector;  // physical primary to restore on Mutter/PipeWire teardown
+    bool suppress_desktop_layout = false;  // probe display: create the head only, never relocate desktop / DPMS-off physical
     bool gamescope_cursor_overlay = true;
     std::shared_ptr<gamescope_session_t> gamescope;
     gamescope_cursor_state_t gamescope_cursor;
@@ -2080,6 +2081,11 @@ if power_action in ("off", "on"):
     vdinfo.backend = requested_backend;
     vdinfo.drm_fd = -1;
     vdinfo.active = true;
+    // The startup encoder-capability probe creates a short-lived virtual head (client name "Probe")
+    // purely to test encoders. It must NOT relocate the real desktop onto the head or DPMS-off the
+    // physical monitor: that is heavy compositor churn that can crash Mutter/NVIDIA and would blank
+    // the local screen on every service start. Only real streaming sessions get the desktop layout.
+    vdinfo.suppress_desktop_layout = (s_client_name != nullptr && std::strcmp(s_client_name, "Probe") == 0);
     vdinfo.gamescope_cursor.x = static_cast<double>(width) / 2.0;
     vdinfo.gamescope_cursor.y = static_cast<double>(height) / 2.0;
     vdinfo.gamescope_cursor.width = width;
@@ -2326,6 +2332,7 @@ if power_action in ("off", "on"):
   bool applyMutterDisplayLayout(const std::string &displayName, bool isolate) {
     uint32_t width = 0, height = 0, fps = 0;
     bool found = false;
+    bool suppress = false;
     {
       std::lock_guard<std::mutex> lock(vdisplay_mutex);
       for (const auto &[guid, vdinfo] : virtual_displays) {
@@ -2333,6 +2340,7 @@ if power_action in ("off", "on"):
           width = vdinfo.width;
           height = vdinfo.height;
           fps = vdinfo.fps;
+          suppress = vdinfo.suppress_desktop_layout;
           found = true;
           break;
         }
@@ -2341,6 +2349,11 @@ if power_action in ("off", "on"):
     if (!found) {
       BOOST_LOG(warning) << "[VDISPLAY] applyMutterDisplayLayout: no active Mutter/PipeWire display named " << displayName;
       return false;
+    }
+    if (suppress) {
+      // Encoder-probe display: leave the physical layout untouched (no isolate, no DPMS-off).
+      BOOST_LOG(info) << "[VDISPLAY] Skipping desktop layout for probe display " << displayName << '.';
+      return true;
     }
     const uint32_t refresh_hz = std::max<uint32_t>(1, fps / 1000);
     BOOST_LOG(info) << "[VDISPLAY] Applying Mutter/PipeWire desktop layout for " << displayName
